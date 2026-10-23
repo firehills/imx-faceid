@@ -23,8 +23,10 @@ struct Keypoint {
 table IdCandidate {
   user_id: string;
   name: string;
-  // Match score in the range 0..1.
+  // Bounded similarity score in the range 0..1; not a calibrated probability.
   confidence: float;
+  // Distance as returned/derived from Qdrant for the configured metric.
+  raw_distance: float;
 }
 
 table IdRequestMsg {

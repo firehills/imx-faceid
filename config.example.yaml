@@ -1,0 +1,39 @@
+nats:
+  url: nats://127.0.0.1:4222
+  subjects:
+    enrol: faceid.enrol
+    query: faceid.query
+    user_info: faceid.user_info
+    delete: faceid.delete
+    debug: faceid.debug
+  token: null
+  username: null
+  password: null
+  credentials_file: null
+
+qdrant:
+  host: 127.0.0.1
+  port: 6333
+  grpc_port: 6334
+  api_key: null
+  https: false
+  metric: cosine # Set to cosine or euclidean.
+  raw_collection: raw_enrol
+  normalized_collection: normalized_enrol
+
+model:
+  path: /absolute/path/to/w600k_r50.onnx # Update to the deployed model file.
+  runtime: auto # auto, onnx, or litert; auto uses .onnx or .tflite.
+  input_layout: NCHW # Set to the model's actual layout: NCHW or NHWC.
+  input_size: 112 # Set to the model's required square input size.
+  input_name: null # Set when model has multiple inputs.
+  output_name: null # Set when model has multiple outputs.
+  color_order: RGB # Set to the model's expected channel order.
+  pixel_scale: null # Required: model-specific numeric value.
+  mean: null # Required: model-specific [R, G, B] values.
+  std: null # Required: model-specific [R, G, B] values.
+  alignment: none # Explicitly choose none or five_point.
+  reference_keypoints: null # Required for five_point: five [[x, y], ...] pairs.
+  honor_preprocessed_flag: true
+  delegate_library: null # Optional LiteRT delegate shared library.
+  delegate_options: {}
