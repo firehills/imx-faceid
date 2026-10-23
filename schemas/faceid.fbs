@@ -1,0 +1,143 @@
+// Face identification messages carried on NATS.
+// Every payload is an Envelope. Time fields are Unix epoch milliseconds.
+
+namespace faceid.fbs;
+
+enum ImageEncoding : ubyte {
+  Unknown = 0,
+  Rgb = 1,
+  Bgr = 2,
+  Bmp = 3,
+  Jpg = 4,
+  Png = 5,
+  Gray = 6
+}
+
+// Pixel coordinates in the source image.
+// Keypoint order is left eye, right eye, nose tip, left mouth corner, right mouth corner.
+struct Keypoint {
+  x: float;
+  y: float;
+}
+
+table IdCandidate {
+  user_id: string;
+  name: string;
+  // Match score in the range 0..1.
+  confidence: float;
+}
+
+table IdRequestMsg {
+  track_id: string (required);
+  image: [ubyte] (required);
+  height: uint;
+  width: uint;
+  is_preprocessed: bool;
+  encoding: ImageEncoding = Unknown;
+  keypoints: [Keypoint] (required);
+  reply_to: string (required);
+  min_confidence: float = 0.5;
+  max_results: uint = 1;
+  pts: int64 = 0;
+  time_unix_ms: int64 = 0;
+  custom: string;
+}
+
+table IdResultMsg {
+  track_id: string (required);
+  candidates: [IdCandidate];
+  time_unix_ms: int64;
+  success: bool;
+  reason: string;
+}
+
+table EnrolMsg {
+  user_id: string (required);
+  name: string (required);
+  image: [ubyte] (required);
+  height: uint;
+  width: uint;
+  is_preprocessed: bool;
+  encoding: ImageEncoding = Unknown;
+  keypoints: [Keypoint] (required);
+  reply_to: string;
+  time_unix_ms: int64;
+  custom: string;
+}
+
+table EnrolResultMsg {
+  user_id: string;
+  success: bool;
+  reason: string;
+  time_unix_ms: int64;
+}
+
+table EnrolmentRecordMsg {
+  embedding: [float];
+  time_unix_ms: int64;
+}
+
+table UserInfoMsg {
+  user_id: string;
+  reply_to: string;
+  time_unix_ms: int64;
+}
+
+table UserInfoResponseMsg {
+  user_id: string;
+  num_enrolments: uint;
+  enrolments: [EnrolmentRecordMsg];
+  success: bool;
+  reason: string;
+  time_unix_ms: int64;
+}
+
+table DeleteUserMsg {
+  user_id: string;
+  reply_to: string;
+  time_unix_ms: int64;
+}
+
+table DeleteUserResponseMsg {
+  user_id: string;
+  success: bool;
+  reason: string;
+  time_unix_ms: int64;
+}
+
+table DebugInfoMsg {
+  reply_to: string;
+  time_unix_ms: int64;
+}
+
+table DebugInfoResponseMsg {
+  database_type: string;
+  database_version: string;
+  inference_backend: string;
+  model_name: string;
+  embedding_dim: uint;
+  nats_url: string;
+  success: bool;
+  reason: string;
+  time_unix_ms: int64;
+}
+
+union Body {
+  IdRequestMsg,
+  IdResultMsg,
+  EnrolMsg,
+  EnrolResultMsg,
+  UserInfoMsg,
+  UserInfoResponseMsg,
+  DeleteUserMsg,
+  DeleteUserResponseMsg,
+  DebugInfoMsg,
+  DebugInfoResponseMsg
+}
+
+table Envelope {
+  body: Body;
+}
+
+root_type Envelope;
+file_identifier "FACE";
