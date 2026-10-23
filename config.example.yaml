@@ -29,9 +29,11 @@ model:
   input_name: null # Set when model has multiple inputs.
   output_name: null # Set when model has multiple outputs.
   color_order: RGB # Set to the model's expected channel order.
-  pixel_scale: null # Required: model-specific numeric value.
-  mean: null # Required: model-specific [R, G, B] values.
-  std: null # Required: model-specific [R, G, B] values.
+  # Standard InsightFace W600K-R50 normalization: (pixel - 127.5) / 127.5.
+  # Update these values when using a model with different preprocessing.
+  pixel_scale: 1.0
+  mean: [127.5, 127.5, 127.5]
+  std: [127.5, 127.5, 127.5]
   alignment: none # Explicitly choose none or five_point.
   reference_keypoints: null # Required for five_point: five [[x, y], ...] pairs.
   honor_preprocessed_flag: true
