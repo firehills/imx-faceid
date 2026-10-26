@@ -39,6 +39,7 @@ def test_config_resolves_defaults_and_paths_relative_to_yaml(tmp_path):
     config = load_config(config_path)
 
     assert config.model.path == model
+    assert config.debug == "info"
     assert config.nats.enrol_subject == "faceid.enrol"
     assert config.model.honor_preprocessed_flag is True
     assert config.qdrant.metric == "euclidean"
@@ -53,6 +54,18 @@ def test_config_requires_alignment_reference_points(tmp_path):
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     with pytest.raises(ConfigurationError, match="reference_keypoints"):
+        load_config(config_path)
+
+
+def test_config_rejects_invalid_debug_level(tmp_path):
+    model = tmp_path / "model.onnx"
+    model.touch()
+    raw = valid_config(model)
+    raw["debug"] = "trace"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="must be one of: none, error, info, verbose"):
         load_config(config_path)
 
 

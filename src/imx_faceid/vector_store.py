@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-import uuid
 import base64
+import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import grpc
 import numpy as np
 from qdrant_client import QdrantClient, models
 
 from imx_faceid.config import QdrantConfig
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -40,22 +44,47 @@ class VectorStore:
     def __init__(self, config: QdrantConfig, embedding_dim: int) -> None:
         self.config = config
         self.embedding_dim = embedding_dim
-        self._client = QdrantClient(
-            host=config.host,
-            port=config.port,
-            grpc_port=config.grpc_port,
-            prefer_grpc=True,
-            check_compatibility=False,
-            api_key=config.api_key,
-            https=config.https,
-        )
         self._distance = (
             models.Distance.COSINE
             if config.metric == "cosine"
             else models.Distance.EUCLID
         )
-        self._ensure_collection(config.raw_collection)
-        self._ensure_collection(config.normalized_collection)
+        self._client = self._new_client(prefer_grpc=True)
+        try:
+            self._ensure_collection(config.raw_collection)
+            self._ensure_collection(config.normalized_collection)
+        except grpc.RpcError as exc:
+            self._client.close()
+            LOGGER.warning(
+                "Qdrant gRPC endpoint %s:%s is unavailable; retrying via REST on %s:%s",
+                config.host,
+                config.grpc_port,
+                config.host,
+                config.port,
+            )
+            self._client = self._new_client(prefer_grpc=False)
+            try:
+                self._ensure_collection(config.raw_collection)
+                self._ensure_collection(config.normalized_collection)
+            except Exception:
+                self._client.close()
+                raise RuntimeError(
+                    "Unable to connect to Qdrant via gRPC or REST. "
+                    f"Checked gRPC at {config.host}:{config.grpc_port} and REST at "
+                    f"{config.host}:{config.port}. Ensure Qdrant is running and the "
+                    "configured host/ports are reachable."
+                ) from exc
+
+    def _new_client(self, *, prefer_grpc: bool) -> QdrantClient:
+        return QdrantClient(
+            host=self.config.host,
+            port=self.config.port,
+            grpc_port=self.config.grpc_port,
+            prefer_grpc=prefer_grpc,
+            check_compatibility=False,
+            api_key=self.config.api_key,
+            https=self.config.https,
+        )
 
     def close(self) -> None:
         self._client.close()

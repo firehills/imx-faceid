@@ -8,14 +8,23 @@ import logging
 import signal
 import sys
 
-from imx_faceid.config import ConfigurationError, load_config
+from imx_faceid.config import AppConfig, ConfigurationError, load_config
 from imx_faceid.inference import EmbeddingModel
 from imx_faceid.service import FaceIdService
 from imx_faceid.vector_store import VectorStore
 
 
-async def _serve(config_path: str) -> None:
-    config = load_config(config_path)
+def _log_level(debug: str) -> int:
+    if debug == "none":
+        return logging.CRITICAL + 1
+    if debug == "error":
+        return logging.ERROR
+    if debug == "info":
+        return logging.INFO
+    return logging.DEBUG
+
+
+async def _serve(config: AppConfig) -> None:
     model = EmbeddingModel(config.model)
     store = await asyncio.to_thread(
         VectorStore, config.qdrant, model.embedding_dim
@@ -34,13 +43,19 @@ def main() -> None:
         "--config", default="config.yaml", help="YAML configuration path"
     )
     args = parser.parse_args()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     try:
-        asyncio.run(_serve(args.config))
+        config = load_config(args.config)
+        logging.basicConfig(
+            level=_log_level(config.debug),
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+        logging.getLogger(__name__).info("Debug mode: %s", config.debug)
+        asyncio.run(_serve(config))
     except (ConfigurationError, OSError, RuntimeError, ValueError) as exc:
+        logging.basicConfig(
+            level=logging.ERROR,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
         logging.getLogger(__name__).error("%s", exc)
         sys.exit(2)
 

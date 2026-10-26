@@ -1,6 +1,7 @@
 import base64
 from types import SimpleNamespace
 
+import grpc
 import numpy as np
 import pytest
 from qdrant_client import models
@@ -96,6 +97,32 @@ class MemoryQdrant:
         pass
 
 
+class FakeRpcError(grpc.RpcError):
+    pass
+
+
+class GrpcUnavailableThenRestQdrant(MemoryQdrant):
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.prefer_grpc = bool(kwargs.get("prefer_grpc", False))
+        self.closed = False
+        super().__init__(**kwargs)
+
+    def collection_exists(self, name):
+        if self.prefer_grpc:
+            raise FakeRpcError("gRPC unavailable")
+        return super().collection_exists(name)
+
+    def close(self):
+        self.closed = True
+
+
+class AlwaysUnavailableQdrant(GrpcUnavailableThenRestQdrant):
+    def collection_exists(self, name):
+        raise FakeRpcError("Qdrant unavailable")
+
+
 @pytest.fixture
 def store(monkeypatch):
     MemoryQdrant.instances.clear()
@@ -112,6 +139,48 @@ def store(monkeypatch):
     )
     result = vector_store.VectorStore(config, embedding_dim=2)
     return result, MemoryQdrant.instances[0]
+
+
+def test_uses_rest_when_grpc_is_unavailable(monkeypatch):
+    GrpcUnavailableThenRestQdrant.instances.clear()
+    monkeypatch.setattr(vector_store, "QdrantClient", GrpcUnavailableThenRestQdrant)
+    config = QdrantConfig(
+        host="localhost",
+        port=6333,
+        grpc_port=6334,
+        api_key=None,
+        https=False,
+        metric="cosine",
+        raw_collection="raw_enrol",
+        normalized_collection="normalized_enrol",
+    )
+
+    result = vector_store.VectorStore(config, embedding_dim=2)
+
+    assert len(GrpcUnavailableThenRestQdrant.instances) == 2
+    grpc_client, rest_client = GrpcUnavailableThenRestQdrant.instances
+    assert grpc_client.prefer_grpc is True
+    assert grpc_client.closed is True
+    assert rest_client.prefer_grpc is False
+    result.close()
+
+
+def test_raises_clear_error_when_grpc_and_rest_are_unavailable(monkeypatch):
+    AlwaysUnavailableQdrant.instances.clear()
+    monkeypatch.setattr(vector_store, "QdrantClient", AlwaysUnavailableQdrant)
+    config = QdrantConfig(
+        host="localhost",
+        port=6333,
+        grpc_port=6334,
+        api_key=None,
+        https=False,
+        metric="cosine",
+        raw_collection="raw_enrol",
+        normalized_collection="normalized_enrol",
+    )
+
+    with pytest.raises(RuntimeError, match="Unable to connect to Qdrant via gRPC or REST"):
+        vector_store.VectorStore(config, embedding_dim=2)
 
 
 def test_enrollment_recalculates_mean_updates_names_and_stores_payload(store):

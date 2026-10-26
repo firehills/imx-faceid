@@ -42,10 +42,54 @@ def bitmap(size=(32, 32)):
     return data.getvalue()
 
 
+def rgb_bytes(size=(32, 32), color=(64, 128, 192)):
+    image = Image.new("RGB", size, color)
+    return image.tobytes()
+
+
+def png(size=(32, 32), color=(64, 128, 192)):
+    image = Image.new("RGB", size, color)
+    data = io.BytesIO()
+    image.save(data, format="PNG")
+    return data.getvalue()
+
+
 def test_prepare_image_resizes_and_uses_requested_layout():
     tensor = prepare_image(
         bitmap(),
         encoding=3,
+        width=32,
+        height=32,
+        is_preprocessed=False,
+        keypoints=[],
+        config=model_config(input_layout="NHWC"),
+    )
+
+    assert tensor.shape == (1, 16, 16, 3)
+    assert tensor.dtype == np.float32
+    assert tensor[0, 0, 0] == pytest.approx([64, 128, 192] / np.float32(255))
+
+
+def test_prepare_image_accepts_rgb_encoding():
+    tensor = prepare_image(
+        rgb_bytes(),
+        encoding=1,
+        width=32,
+        height=32,
+        is_preprocessed=False,
+        keypoints=[],
+        config=model_config(input_layout="NHWC"),
+    )
+
+    assert tensor.shape == (1, 16, 16, 3)
+    assert tensor.dtype == np.float32
+    assert tensor[0, 0, 0] == pytest.approx([64, 128, 192] / np.float32(255))
+
+
+def test_prepare_image_accepts_png_encoding():
+    tensor = prepare_image(
+        png(),
+        encoding=5,
         width=32,
         height=32,
         is_preprocessed=False,
@@ -112,11 +156,22 @@ def test_five_point_alignment_requires_points_and_produces_model_shape():
     assert tensor.shape == (1, 3, 16, 16)
 
 
-def test_rejects_non_bmp_and_non_square_images():
-    with pytest.raises(InferenceError, match="Only BMP"):
+def test_rejects_unsupported_encoding_and_non_square_images():
+    with pytest.raises(InferenceError, match="Only BMP, RGB, or PNG"):
         prepare_image(
             bitmap(),
-            encoding=1,
+            encoding=2,
+            width=32,
+            height=32,
+            is_preprocessed=False,
+            keypoints=[],
+            config=model_config(),
+        )
+
+    with pytest.raises(InferenceError, match="not PNG"):
+        prepare_image(
+            bitmap(),
+            encoding=5,
             width=32,
             height=32,
             is_preprocessed=False,
@@ -129,6 +184,21 @@ def test_rejects_non_bmp_and_non_square_images():
             encoding=3,
             width=32,
             height=24,
+            is_preprocessed=False,
+            keypoints=[],
+            config=model_config(),
+        )
+
+
+def test_rejects_invalid_rgb_payload_size():
+    with pytest.raises(
+        InferenceError, match="RGB image data length does not match message width and height"
+    ):
+        prepare_image(
+            rgb_bytes()[:-1],
+            encoding=1,
+            width=32,
+            height=32,
             is_preprocessed=False,
             keypoints=[],
             config=model_config(),

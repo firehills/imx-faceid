@@ -1,8 +1,10 @@
+debug: info # none, error, info, or verbose.
+
 nats:
   url: nats://127.0.0.1:4222
   subjects:
     enrol: faceid.enrol
-    query: faceid.query
+    query: faceid.identify
     user_info: faceid.user_info
     delete: faceid.delete
     debug: faceid.debug

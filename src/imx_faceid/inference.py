@@ -79,23 +79,49 @@ def prepare_image(
     keypoints: list[tuple[float, float]],
     config: ModelConfig,
 ) -> np.ndarray:
-    """Decode a BMP and prepare the model's configured NCHW or NHWC tensor."""
-    if encoding not in {0, 3}:  # Unknown or BMP in the schema.
-        raise InferenceError("Only BMP image data is supported")
-    try:
-        with Image.open(io.BytesIO(image_bytes)) as source:
-            if source.format != "BMP":
-                raise InferenceError("The image payload is not BMP data")
-            image = source.convert("RGB")
-    except (OSError, ValueError) as exc:
-        raise InferenceError(f"Unable to decode BMP image: {exc}") from exc
+    """Decode a BMP, RGB, or PNG payload and prepare the configured model tensor."""
+    if encoding in {0, 3}:  # Unknown or BMP in the schema.
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as source:
+                if source.format != "BMP":
+                    raise InferenceError("The image payload is not BMP data")
+                image = source.convert("RGB")
+        except (OSError, ValueError) as exc:
+            raise InferenceError(f"Unable to decode BMP image: {exc}") from exc
+    elif encoding == 1:  # RGB in the schema.
+        if width < 1 or height < 1:
+            raise InferenceError(
+                "RGB image data requires positive message width and height"
+            )
+        expected_length = width * height * 3
+        if len(image_bytes) != expected_length:
+            raise InferenceError(
+                "RGB image data length does not match message width and height"
+            )
+        image = Image.frombytes("RGB", (width, height), image_bytes)
+    elif encoding == 5:  # PNG in the schema.
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as source:
+                if source.format != "PNG":
+                    raise InferenceError("The image payload is not PNG data")
+                image = source.convert("RGB")
+        except (OSError, ValueError) as exc:
+            raise InferenceError(f"Unable to decode PNG image: {exc}") from exc
+    else:
+        raise InferenceError(
+            f"Only BMP, RGB, or PNG image data is supported, we got encoding {encoding}"
+        )
 
     if image.width != image.height:
         raise InferenceError("Face images must be square")
     if width and width != image.width:
-        raise InferenceError(f"Message width {width} does not match BMP width {image.width}")
+        raise InferenceError(
+            f"Message width {width} does not match decoded width {image.width}"
+        )
     if height and height != image.height:
-        raise InferenceError(f"Message height {height} does not match BMP height {image.height}")
+        raise InferenceError(
+            f"Message height {height} does not match decoded height {image.height}"
+        )
 
     skip_spatial_preprocessing = (
         is_preprocessed and config.honor_preprocessed_flag

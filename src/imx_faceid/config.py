@@ -61,6 +61,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
+    debug: str
     nats: NatsConfig
     qdrant: QdrantConfig
     model: ModelConfig
@@ -114,6 +115,11 @@ def load_config(path: str | Path) -> AppConfig:
 
     if not isinstance(raw, dict):
         raise ConfigurationError("Configuration root must be a mapping")
+    debug = str(raw.get("debug", "info")).lower()
+    if debug not in {"none", "error", "info", "verbose"}:
+        raise ConfigurationError(
+            "Configuration 'debug' must be one of: none, error, info, verbose"
+        )
 
     nats_raw = _section(raw, "nats")
     subjects = nats_raw.get("subjects", {})
@@ -269,4 +275,4 @@ def load_config(path: str | Path) -> AppConfig:
     if not model.path.is_file():
         raise ConfigurationError(f"Model file does not exist: {model.path}")
 
-    return AppConfig(nats=nats, qdrant=qdrant, model=model)
+    return AppConfig(debug=debug, nats=nats, qdrant=qdrant, model=model)
