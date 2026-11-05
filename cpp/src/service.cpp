@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 #include <limits>
 #include <stdexcept>
@@ -24,6 +25,28 @@ void checkNats(natsStatus status, const std::string& operation) {
   if (status != NATS_OK) {
     throw std::runtime_error(operation + ": " + natsError(status));
   }
+}
+
+// Summarise image metadata without the pixel/encoded byte payload.
+std::string describeImage(const ImageRequest& image) {
+  return fmt::format(
+      "image={{{}x{} encoding={} preprocessed={} bytes={} keypoints={}}}",
+      image.width, image.height,
+      faceid::fbs::EnumNameImageEncoding(image.encoding), image.is_preprocessed,
+      image.bytes.size(), image.keypoints.size());
+}
+
+std::string describeCandidates(const std::vector<Candidate>& candidates) {
+  std::string result = "[";
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    const Candidate& candidate = candidates[index];
+    result += fmt::format("{}{{user_id={} name={} confidence={:.4f} "
+                          "raw_distance={:.4f}}}",
+                          index == 0 ? "" : ", ", candidate.user_id,
+                          candidate.name, candidate.confidence,
+                          candidate.raw_distance);
+  }
+  return result + "]";
 }
 
 int64_t currentTimeUnixMs() {
@@ -118,6 +141,9 @@ void FaceIdService::onMessage(natsConnection*, natsSubscription*, natsMsg* messa
 void FaceIdService::dispatch(Operation operation, natsMsg* message) {
   const char* subject = natsMsg_GetSubject(message);
   spdlog::debug("NATS request subject={}", subject == nullptr ? "" : subject);
+  spdlog::trace("NATS rx subject={} payload_bytes={}",
+                subject == nullptr ? "" : subject,
+                natsMsg_GetDataLength(message));
   switch (operation) {
     case Operation::Enrol:
       handleEnrol(message);
@@ -145,11 +171,22 @@ void FaceIdService::handleEnrol(natsMsg* message) {
     const EnrolRequest request = parseEnrolRequest(data.data(), data.size());
     user_id = request.user_id;
     reply_to = request.reply_to;
+    spdlog::trace(
+        "NATS rx Enrol user_id={} name={} reply_to={} time_unix_ms={} "
+        "custom_bytes={} {}",
+        request.user_id, request.name, request.reply_to, request.time_unix_ms,
+        request.custom.size(), describeImage(request.image));
     std::vector<float> embedding;
+    InferenceTiming timing;
     {
       std::lock_guard<std::mutex> lock(inference_mutex_);
-      embedding = model_.embed(request.image);
+      embedding = model_.embed(request.image, &timing);
     }
+    spdlog::info(
+        "Inference enrol user_id={} runtime={} preprocess_ms={:.2f} "
+        "inference_ms={:.2f}",
+        user_id, model_.runtimeName(), timing.preprocess_ms,
+        timing.inference_ms);
     const int64_t time_unix_ms =
         request.time_unix_ms == 0 ? currentTimeUnixMs() : request.time_unix_ms;
     const std::shared_ptr<std::mutex> user_lock = userMutex(user_id);
@@ -158,9 +195,14 @@ void FaceIdService::handleEnrol(natsMsg* message) {
       store_.enroll(user_id, request.name, request.custom, embedding,
                     request.image.bytes, time_unix_ms);
     }
+    spdlog::trace("NATS tx EnrolResult reply_to={} user_id={} success=true",
+                  reply_to, user_id);
     publish(reply_to, makeEnrolResult(user_id, true));
   } catch (const std::exception& error) {
     logFailure("Enrol request", user_id, error);
+    spdlog::trace(
+        "NATS tx EnrolResult reply_to={} user_id={} success=false reason={}",
+        reply_to, user_id, error.what());
     publish(reply_to, makeEnrolResult(user_id, false, error.what()));
   }
 }
@@ -173,6 +215,12 @@ void FaceIdService::handleQuery(natsMsg* message) {
     const QueryRequest request = parseQueryRequest(data.data(), data.size());
     track_id = request.track_id;
     reply_to = request.reply_to;
+    spdlog::trace(
+        "NATS rx IdRequest track_id={} reply_to={} min_confidence={} "
+        "max_results={} pts={} time_unix_ms={} custom_bytes={} {}",
+        request.track_id, request.reply_to, request.min_confidence,
+        request.max_results, request.pts, request.time_unix_ms,
+        request.custom.size(), describeImage(request.image));
     if (request.max_results == 0) {
       throw std::invalid_argument("max_results must be at least one");
     }
@@ -181,15 +229,30 @@ void FaceIdService::handleQuery(natsMsg* message) {
       throw std::invalid_argument("min_confidence must be in the range 0..1");
     }
     std::vector<float> embedding;
+    InferenceTiming timing;
     {
       std::lock_guard<std::mutex> lock(inference_mutex_);
-      embedding = model_.embed(request.image);
+      embedding = model_.embed(request.image, &timing);
     }
+    spdlog::info(
+        "Inference query track_id={} runtime={} preprocess_ms={:.2f} "
+        "inference_ms={:.2f}",
+        track_id, model_.runtimeName(), timing.preprocess_ms,
+        timing.inference_ms);
     const std::vector<Candidate> candidates =
         store_.query(embedding, request.max_results, request.min_confidence);
+    if (spdlog::should_log(spdlog::level::trace)) {
+      spdlog::trace(
+          "NATS tx IdResult reply_to={} track_id={} success=true "
+          "candidates={} {}",
+          reply_to, track_id, candidates.size(), describeCandidates(candidates));
+    }
     publish(reply_to, makeQueryResult(track_id, candidates, true));
   } catch (const std::exception& error) {
     logFailure("Identity query", track_id, error);
+    spdlog::trace(
+        "NATS tx IdResult reply_to={} track_id={} success=false reason={}",
+        reply_to, track_id, error.what());
     publish(reply_to, makeQueryResult(track_id, std::vector<Candidate>(), false,
                                       error.what()));
   }
@@ -203,10 +266,28 @@ void FaceIdService::handleUserInfo(natsMsg* message) {
     const UserInfoRequest request = parseUserInfoRequest(data.data(), data.size());
     user_id = request.user_id;
     reply_to = request.reply_to;
+    spdlog::trace("NATS rx UserInfo user_id={} reply_to={} time_unix_ms={}",
+                  request.user_id, request.reply_to, request.time_unix_ms);
     const std::vector<EnrolmentRecord> records = store_.userInfo(user_id);
+    if (spdlog::should_log(spdlog::level::trace)) {
+      std::string timestamps;
+      for (const EnrolmentRecord& record : records) {
+        timestamps += (timestamps.empty() ? "" : ",") +
+                      std::to_string(record.time_unix_ms);
+      }
+      spdlog::trace(
+          "NATS tx UserInfoResponse reply_to={} user_id={} success=true "
+          "records={} embedding_dim={} time_unix_ms=[{}]",
+          reply_to, user_id, records.size(),
+          records.empty() ? 0 : records.front().embedding.size(), timestamps);
+    }
     publish(reply_to, makeUserInfoResponse(user_id, records, true));
   } catch (const std::exception& error) {
     logFailure("User info request", user_id, error);
+    spdlog::trace(
+        "NATS tx UserInfoResponse reply_to={} user_id={} success=false "
+        "reason={}",
+        reply_to, user_id, error.what());
     publish(reply_to, makeUserInfoResponse(
                           user_id, std::vector<EnrolmentRecord>(), false,
                           error.what()));
@@ -221,14 +302,23 @@ void FaceIdService::handleDeleteUser(natsMsg* message) {
     const DeleteRequest request = parseDeleteRequest(data.data(), data.size());
     user_id = request.user_id;
     reply_to = request.reply_to;
+    spdlog::trace("NATS rx DeleteUser user_id={} reply_to={} time_unix_ms={}",
+                  request.user_id, request.reply_to, request.time_unix_ms);
     const std::shared_ptr<std::mutex> user_lock = userMutex(user_id);
     {
       std::lock_guard<std::mutex> lock(*user_lock);
       store_.deleteUser(user_id);
     }
+    spdlog::trace(
+        "NATS tx DeleteUserResponse reply_to={} user_id={} success=true",
+        reply_to, user_id);
     publish(reply_to, makeDeleteResponse(user_id, true));
   } catch (const std::exception& error) {
     logFailure("User deletion", user_id, error);
+    spdlog::trace(
+        "NATS tx DeleteUserResponse reply_to={} user_id={} success=false "
+        "reason={}",
+        reply_to, user_id, error.what());
     publish(reply_to, makeDeleteResponse(user_id, false, error.what()));
   }
 }
@@ -239,9 +329,17 @@ void FaceIdService::handleDebug(natsMsg* message) {
     const std::vector<uint8_t> data = messageData(message);
     const DebugRequest request = parseDebugRequest(data.data(), data.size());
     reply_to = request.reply_to;
+    spdlog::trace("NATS rx DebugInfo reply_to={} time_unix_ms={}",
+                  request.reply_to, request.time_unix_ms);
     const std::pair<std::string, std::string> database = store_.debugInfo();
     const std::string model_name =
         std::filesystem::path(config_.model.path).filename().string();
+    spdlog::trace(
+        "NATS tx DebugInfoResponse reply_to={} success=true database={} "
+        "database_version={} inference_backend={} model={} embedding_dim={} "
+        "nats_url={}",
+        reply_to, database.first, database.second, model_.runtimeName(),
+        model_name, model_.embeddingDimension(), config_.nats.url);
     publish(reply_to,
             makeDebugResponse(database.first, database.second,
                               model_.runtimeName(), model_name,
@@ -251,6 +349,9 @@ void FaceIdService::handleDebug(natsMsg* message) {
     logFailure("Debug info request", std::string(), error);
     const std::string model_name =
         std::filesystem::path(config_.model.path).filename().string();
+    spdlog::trace(
+        "NATS tx DebugInfoResponse reply_to={} success=false reason={}",
+        reply_to, error.what());
     publish(reply_to,
             makeDebugResponse("qdrant", std::string(), model_.runtimeName(),
                               model_name,
@@ -262,6 +363,7 @@ void FaceIdService::handleDebug(natsMsg* message) {
 void FaceIdService::publish(const std::string& reply_to,
                             const std::vector<uint8_t>& payload) {
   if (reply_to.empty()) {
+    spdlog::trace("NATS tx skipped: request has no reply_to");
     return;
   }
   if (payload.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
