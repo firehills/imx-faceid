@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package qdrant;
+
+service Qdrant {
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckReply) {}
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckReply {
+  string title = 1;
+  string version = 2;
+  optional string commit = 3;
+}

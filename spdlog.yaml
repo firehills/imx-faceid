@@ -1,0 +1,5 @@
+# C++ service only. Relative file paths resolve from this configuration file.
+level: info # trace, debug, info, warn, error, critical, off
+pattern: "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v"
+console: true # stderr, with color when supported
+file: null # Optional append-only log file, e.g. logs/imx-faceid-cpp.log
