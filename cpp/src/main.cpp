@@ -66,9 +66,10 @@ Options parseOptions(int argc, char** argv) {
 /**
  * Initialize logging and dependencies, then run until SIGINT or SIGTERM.
  *
- * Startup failures are written through the bootstrap stderr logger. Successful
- * startup transfers configuration, model, and store references to the service;
- * after its signal-controlled loop exits, logging is flushed before returning.
+ * Startup failures are written through the bootstrap stderr logger. After
+ * logging is configured, the compiled application version is logged before
+ * loading the application settings and initializing the service dependencies.
+ * After the signal-controlled service loop exits, logging is flushed.
  * @param argc Number of process arguments.
  * @param argv Argument strings, including the executable name.
  * @return Zero for normal shutdown/help, or two for a reported startup/runtime
@@ -80,6 +81,7 @@ int main(int argc, char** argv) {
   try {
     const Options options = parseOptions(argc, argv);
     faceid::initializeLogging(options.logging_path);
+    spdlog::info("imx-faceid-cpp version {}", IMX_FACEID_CPP_VERSION);
     const faceid::AppConfig config = faceid::loadConfig(options.config_path);
     faceid::EmbeddingModel model(config.model);
     faceid::VectorStore store(config.qdrant, model.embeddingDimension());

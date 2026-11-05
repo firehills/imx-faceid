@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(imx_faceid_cpp LANGUAGES CXX)
+project(imx_faceid_cpp VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
 
@@ -221,6 +221,9 @@ add_executable(imx_faceid_cpp
     cpp/src/main.cpp
     cpp/src/service.cpp
 )
+target_compile_definitions(imx_faceid_cpp PRIVATE
+    IMX_FACEID_CPP_VERSION="${PROJECT_VERSION}"
+)
 target_link_libraries(imx_faceid_cpp PRIVATE
     faceid_logging
     faceid_inference
@@ -235,6 +238,14 @@ if(BUILD_TESTING)
     add_test(NAME cpp_help COMMAND imx_faceid_cpp --help)
     set_tests_properties(cpp_help PROPERTIES
         PASS_REGULAR_EXPRESSION "logging-config"
+    )
+    add_test(NAME cpp_startup_version
+        COMMAND "${CMAKE_COMMAND}"
+            "-DFACEID_EXECUTABLE=$<TARGET_FILE:imx_faceid_cpp>"
+            "-DFACEID_EMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+            "-DFACEID_VERSION=${PROJECT_VERSION}"
+            "-DFACEID_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/test_startup_version.cmake"
     )
     add_executable(test_vector_store_scores cpp/tests/test_vector_store_scores.cpp)
     target_link_libraries(test_vector_store_scores PRIVATE faceid_score)

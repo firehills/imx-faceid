@@ -18,6 +18,23 @@ matching package or downloads the SHA-256-verified release. For offline builds,
 provide an unpacked 1.17.0 release with
 `-DFETCHCONTENT_SOURCE_DIR_SPDLOG=/path/to/spdlog-1.17.0`.
 
+## Version
+
+The C++ application's version is set in the `project(... VERSION ...)` entry
+in [CMakeLists.txt](CMakeLists.txt). CMake embeds this value in the executable
+at build time; update that entry and rebuild when releasing a new version.
+It is maintained independently of the Python package version.
+
+After loading the logging configuration, the service logs its version at
+`info` level before initializing the application configuration and model:
+
+```text
+imx-faceid-cpp version 0.1.0
+```
+
+The message follows the configured spdlog level and destinations, so it is
+suppressed at `warn`, `error`, `critical`, or `off`.
+
 ## Logging
 
 ```sh
