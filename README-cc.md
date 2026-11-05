@@ -48,8 +48,24 @@ with a diagnostic on stderr. Errors flush immediately; normal shutdown flushes
 all pending output.
 
 The shared application YAML's legacy `debug` setting is **ignored by C++**.
-Use `level: debug` for request/response details (formerly `verbose`), `info`
-for service status, `error` for errors only, and `off` to suppress service logs.
+Use `level: debug` for request/response subjects and sizes (formerly `verbose`),
+`trace` to also log each decoded NATS request and encoded response (IDs, names,
+`reply_to`, thresholds, timestamps, image dimensions/encoding, candidate matches,
+and byte/record counts; image bytes, embeddings, and `custom` contents are never
+printed), `info`
+for service status and per-request inference timing, `error` for errors only,
+and `off` to suppress service logs.
+
+At `info`, each enrolment and identity query logs one line, for example:
+
+```
+Inference query track_id=track-7 runtime=onnx preprocess_ms=0.64 inference_ms=12.31
+```
+
+`preprocess_ms` covers image decoding, alignment, resizing, and tensor conversion.
+`inference_ms` covers ONNX Runtime or LiteRT execution plus embedding
+normalization. Neither includes time spent waiting for another request's
+inference to finish, or Qdrant access.
 Fatal startup errors are always reported on stderr, even when logging is off.
 Command-line help remains plain stdout, not a log message.
 

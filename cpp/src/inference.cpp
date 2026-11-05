@@ -9,6 +9,7 @@
 #include <tensorflow/lite/model.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -282,10 +283,22 @@ class EmbeddingModel::Impl {
     }
   }
 
-  std::vector<float> run(const ImageRequest& image) {
+  std::vector<float> run(const ImageRequest& image, InferenceTiming* timing) {
+    using Clock = std::chrono::steady_clock;
+    using Milliseconds = std::chrono::duration<double, std::milli>;
+    const Clock::time_point preprocess_start = Clock::now();
     const std::vector<float> tensor = prepareImage(image, config);
+    const Clock::time_point preprocess_end = Clock::now();
     std::lock_guard<std::mutex> lock(mutex);
+    const Clock::time_point inference_start = Clock::now();
     std::vector<float> output = normalizeEmbedding(infer(tensor));
+    const Clock::time_point inference_end = Clock::now();
+    if (timing != nullptr) {
+      timing->preprocess_ms =
+          Milliseconds(preprocess_end - preprocess_start).count();
+      timing->inference_ms =
+          Milliseconds(inference_end - inference_start).count();
+    }
     if (output.size() != dimension) {
       std::ostringstream message;
       message << "Model output dimension changed from " << dimension << " to "
@@ -494,8 +507,9 @@ EmbeddingModel::EmbeddingModel(const ModelConfig& config)
 
 EmbeddingModel::~EmbeddingModel() {}
 
-std::vector<float> EmbeddingModel::embed(const ImageRequest& image) {
-  return impl_->run(image);
+std::vector<float> EmbeddingModel::embed(const ImageRequest& image,
+                                         InferenceTiming* timing) {
+  return impl_->run(image, timing);
 }
 
 size_t EmbeddingModel::embeddingDimension() const { return impl_->dimension; }

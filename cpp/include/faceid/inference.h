@@ -25,6 +25,14 @@ std::vector<float> normalizeEmbedding(const std::vector<float>& values);
 std::vector<float> prepareImage(const ImageRequest& image,
                                 const ModelConfig& config);
 
+/** Wall-clock durations for one embedding, excluding time spent waiting for locks. */
+struct InferenceTiming {
+  /** Image decoding, alignment, resizing, and tensor conversion. */
+  double preprocess_ms = 0.0;
+  /** ONNX Runtime or LiteRT execution plus embedding normalization. */
+  double inference_ms = 0.0;
+};
+
 /** Own an ONNX Runtime or TensorFlow Lite model and generate normalized vectors. */
 class EmbeddingModel {
  public:
@@ -37,8 +45,10 @@ class EmbeddingModel {
   EmbeddingModel(const EmbeddingModel&) = delete;
   EmbeddingModel& operator=(const EmbeddingModel&) = delete;
 
-  /** Run preprocessing and inference, returning a unit-length float vector. */
-  std::vector<float> embed(const ImageRequest& image);
+  /** Run preprocessing and inference, returning a unit-length float vector.
+   *  When timing is non-null it receives the stage durations on success. */
+  std::vector<float> embed(const ImageRequest& image,
+                           InferenceTiming* timing = nullptr);
 
   /** Return the embedding size discovered by a startup inference. */
   size_t embeddingDimension() const;
