@@ -11,6 +11,13 @@
 namespace faceid {
 namespace {
 
+/**
+ * Fetch a required, non-null child from a YAML mapping.
+ * @param node Mapping that owns the setting.
+ * @param key Setting name within the mapping.
+ * @param section Configuration section used to identify the setting in errors.
+ * @return The YAML node to be converted by the caller.
+ */
 YAML::Node required(const YAML::Node& node, const std::string& key,
                     const std::string& section) {
   const YAML::Node value = node[key];
@@ -21,6 +28,12 @@ YAML::Node required(const YAML::Node& node, const std::string& key,
   return value;
 }
 
+/**
+ * Read a named configuration section and ensure it is a YAML mapping.
+ * @param root Top-level configuration mapping.
+ * @param name Required section name.
+ * @return The section node; missing or non-mapping sections are rejected.
+ */
 YAML::Node section(const YAML::Node& root, const std::string& name) {
   const YAML::Node value = root[name];
   if (!value || !value.IsMap()) {
@@ -30,6 +43,12 @@ YAML::Node section(const YAML::Node& root, const std::string& name) {
   return value;
 }
 
+/**
+ * Convert a YAML scalar into a string and normalize conversion failures.
+ * @param node Scalar value supplied by YAML.
+ * @param field Full setting name, used to identify invalid input.
+ * @return The converted string.
+ */
 std::string readString(const YAML::Node& node, const std::string& field) {
   try {
     return node.as<std::string>();
@@ -38,6 +57,12 @@ std::string readString(const YAML::Node& node, const std::string& field) {
   }
 }
 
+/**
+ * Convert a YAML scalar into a finite float.
+ * @param node Scalar value supplied by YAML.
+ * @param field Setting name used in conversion and range errors.
+ * @return A finite floating-point value.
+ */
 float readFiniteFloat(const YAML::Node& node, const std::string& field) {
   float value = 0.0f;
   try {
@@ -51,6 +76,12 @@ float readFiniteFloat(const YAML::Node& node, const std::string& field) {
   return value;
 }
 
+/**
+ * Convert a YAML scalar into a strictly positive integer.
+ * @param node Scalar value supplied by YAML.
+ * @param field Setting name used in conversion and range errors.
+ * @return A positive integer.
+ */
 int readPositiveInt(const YAML::Node& node, const std::string& field) {
   int value = 0;
   try {
@@ -64,6 +95,12 @@ int readPositiveInt(const YAML::Node& node, const std::string& field) {
   return value;
 }
 
+/**
+ * Read a three-element sequence of finite floats, used for RGB normalization.
+ * @param node YAML sequence containing exactly three scalar values.
+ * @param field Setting name used to report malformed values.
+ * @return The values in their original channel order.
+ */
 std::array<float, 3> readTriple(const YAML::Node& node,
                                 const std::string& field) {
   if (!node.IsSequence() || node.size() != 3) {
@@ -76,6 +113,12 @@ std::array<float, 3> readTriple(const YAML::Node& node,
   return result;
 }
 
+/**
+ * Convert an optional YAML scalar to a string, using empty text when absent.
+ * @param node Optional scalar node.
+ * @param field Setting name used if conversion fails.
+ * @return The configured string, or an empty string for absent/null input.
+ */
 std::string optionalString(const YAML::Node& node, const char* field) {
   if (!node || node.IsNull()) {
     return std::string();
@@ -83,6 +126,13 @@ std::string optionalString(const YAML::Node& node, const char* field) {
   return readString(node, field);
 }
 
+/**
+ * Read an optional boolean while preserving the caller's default.
+ * @param node Optional scalar node.
+ * @param field Setting name used if conversion fails.
+ * @param fallback Value used for absent or null input.
+ * @return The configured boolean or fallback.
+ */
 bool optionalBool(const YAML::Node& node, const char* field, bool fallback) {
   if (!node || node.IsNull()) {
     return fallback;
@@ -95,6 +145,11 @@ bool optionalBool(const YAML::Node& node, const char* field, bool fallback) {
   }
 }
 
+/**
+ * Read five finite [x, y] reference points for face alignment.
+ * @param node Optional YAML sequence; absent input means no reference points.
+ * @return Ordered landmark coordinates, or an empty vector when not configured.
+ */
 std::vector<std::array<float, 2> > readReferencePoints(
     const YAML::Node& node) {
   std::vector<std::array<float, 2> > result;
@@ -118,6 +173,7 @@ std::vector<std::array<float, 2> > readReferencePoints(
   return result;
 }
 
+/** Normalize ASCII uppercase letters for case-insensitive enum settings. */
 std::string lowercase(std::string value) {
   for (size_t index = 0; index < value.size(); ++index) {
     if (value[index] >= 'A' && value[index] <= 'Z') {
@@ -127,6 +183,7 @@ std::string lowercase(std::string value) {
   return value;
 }
 
+/** Normalize ASCII lowercase letters for case-insensitive layout settings. */
 std::string uppercase(std::string value) {
   for (size_t index = 0; index < value.size(); ++index) {
     if (value[index] >= 'a' && value[index] <= 'z') {
@@ -138,9 +195,19 @@ std::string uppercase(std::string value) {
 
 }  // namespace
 
+/** Preserve a validated configuration diagnostic as a standard exception. */
 ConfigurationError::ConfigurationError(const std::string& message)
     : std::runtime_error(message) {}
 
+/**
+ * Load and validate all application settings from one YAML document.
+ *
+ * The loader converts NATS, Qdrant, and model sections into typed structures,
+ * fills documented defaults, normalizes enum-like values, resolves model paths
+ * relative to the YAML file, and rejects invalid combinations before startup.
+ * @param path Filesystem path of the application YAML document.
+ * @return Complete settings safe to pass to the service, inference, and store.
+ */
 AppConfig loadConfig(const std::string& path) {
   YAML::Node root;
   try {
@@ -154,6 +221,8 @@ AppConfig loadConfig(const std::string& path) {
   }
 
   AppConfig config;
+  // Read NATS connection settings and default subject names, then ensure the
+  // subjects are distinct and only one authentication method is configured.
   const YAML::Node nats = section(root, "nats");
   const YAML::Node subjects = nats["subjects"];
   if (subjects && !subjects.IsMap()) {
@@ -208,6 +277,7 @@ AppConfig loadConfig(const std::string& path) {
         "NATS username and password must be configured together");
   }
 
+  // Validate Qdrant endpoint, collections, and the score metric used by queries.
   const YAML::Node qdrant = section(root, "qdrant");
   config.qdrant.host = readString(required(qdrant, "host", "qdrant"),
                                   "qdrant.host");
@@ -238,6 +308,8 @@ AppConfig loadConfig(const std::string& path) {
     throw ConfigurationError("Qdrant collection names must be non-empty and different");
   }
 
+  // Resolve the model location and validate tensor layout, preprocessing,
+  // runtime selection, and the compatibility of optional LiteRT settings.
   const YAML::Node model = section(root, "model");
   config.model.path = readString(required(model, "path", "model"), "model.path");
   std::filesystem::path model_path(config.model.path);
@@ -318,6 +390,8 @@ AppConfig loadConfig(const std::string& path) {
         "LiteRT delegate settings cannot be used with an ONNX model");
   }
 
+  // Fail during configuration loading instead of deferring a missing-file
+  // error until the model runtime is initialized.
   std::ifstream model_file(config.model.path.c_str(), std::ios::binary);
   if (!model_file.good()) {
     throw ConfigurationError("Model file does not exist: " + config.model.path);

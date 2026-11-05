@@ -11,21 +11,38 @@
 
 namespace faceid {
 
-/** Raised when image decoding or model execution cannot produce an embedding. */
+/**
+ * Raised when request image conversion or backend execution cannot produce an
+ * embedding accepted by the service.
+ */
 class InferenceError : public std::runtime_error {
  public:
-  /** Create an inference error with an explanation safe to return to a client. */
+  /** Construct an inference failure with a caller-readable diagnostic. */
   explicit InferenceError(const std::string& message);
 };
 
-/** Return a finite, non-zero vector scaled to unit Euclidean length. */
+/**
+ * Validate and normalize a raw model output to unit Euclidean length.
+ * @param values Raw model output components.
+ * @return Owned finite, non-zero vector with unit norm.
+ * @throws InferenceError if values are empty, non-finite, or zero-length.
+ */
 std::vector<float> normalizeEmbedding(const std::vector<float>& values);
 
-/** Decode and normalize an image into the configured model tensor layout. */
+/**
+ * Decode and preprocess request pixels into the model's normalized tensor.
+ * @param image Raw RGB or supported compressed image and request metadata.
+ * @param config Model input size, layout, color order, alignment, and scaling.
+ * @return Contiguous float tensor in the configured NCHW or NHWC order.
+ * @throws InferenceError for invalid image data or incompatible metadata.
+ */
 std::vector<float> prepareImage(const ImageRequest& image,
                                 const ModelConfig& config);
 
-/** Wall-clock durations for one embedding, excluding time spent waiting for locks. */
+/**
+ * Per-call wall-clock stage durations, excluding wait for the inference mutex.
+ * Values are populated on successful embed() calls only.
+ */
 struct InferenceTiming {
   /** Image decoding, alignment, resizing, and tensor conversion. */
   double preprocess_ms = 0.0;
@@ -33,30 +50,45 @@ struct InferenceTiming {
   double inference_ms = 0.0;
 };
 
-/** Own an ONNX Runtime or TensorFlow Lite model and generate normalized vectors. */
+/**
+ * Own one ONNX Runtime or LiteRT model and transform request images to vectors.
+ * Construction loads the model and performs a warm-up inference to determine
+ * output dimension; embed() preprocesses each request and serializes backend use.
+ */
 class EmbeddingModel {
  public:
-  /** Load the configured model and discover its embedding dimension. */
+  /**
+   * Load the configured runtime/model and discover output dimension by warm-up.
+   * @param config Validated model path, runtime, and tensor/preprocessing data.
+   * @throws InferenceError if model loading or warm-up fails.
+   */
   explicit EmbeddingModel(const ModelConfig& config);
 
-  /** Release model sessions, interpreters, and any configured delegate. */
+  /** Release runtime sessions, interpreter tensors, and any external delegate. */
   ~EmbeddingModel();
 
   EmbeddingModel(const EmbeddingModel&) = delete;
   EmbeddingModel& operator=(const EmbeddingModel&) = delete;
 
-  /** Run preprocessing and inference, returning a unit-length float vector.
-   *  When timing is non-null it receives the stage durations on success. */
+  /**
+   * Decode and preprocess one image, execute the model, and normalize its output.
+   * @param image Request payload and image preprocessing metadata.
+   * @param timing Optional output receiving preprocessing and model durations;
+   *               left unchanged if the operation throws.
+   * @return Unit-length embedding with embeddingDimension() components.
+   * @throws InferenceError for invalid images, incompatible tensors, or runtime
+   *         failures.
+   */
   std::vector<float> embed(const ImageRequest& image,
                            InferenceTiming* timing = nullptr);
 
-  /** Return the embedding size discovered by a startup inference. */
+  /** Return the output vector length measured during constructor warm-up. */
   size_t embeddingDimension() const;
 
-  /** Return the selected runtime name: "onnx" or "litert". */
+  /** Return the selected runtime identifier: "onnx" or "litert". */
   const std::string& runtimeName() const;
 
-  /** Return the configured model path for service diagnostics. */
+  /** Return the resolved model file path retained from ModelConfig. */
   const std::string& modelPath() const;
 
  private:

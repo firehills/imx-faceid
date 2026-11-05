@@ -15,59 +15,78 @@ class ConfigurationError : public std::runtime_error {
   explicit ConfigurationError(const std::string& message);
 };
 
-/** NATS connection, authentication, and subject settings. */
+/**
+ * NATS endpoint, authentication credentials, and request subject routing.
+ * The loader enforces exactly one authentication mode and unique non-empty
+ * subjects; empty credential fields indicate that mode is not selected.
+ */
 struct NatsConfig {
-  std::string url;
-  std::string enrol_subject;
-  std::string query_subject;
-  std::string user_info_subject;
-  std::string delete_subject;
-  std::string debug_subject;
-  std::string token;
-  std::string username;
-  std::string password;
-  std::string credentials_file;
+  std::string url;                 ///< NATS server URL.
+  std::string enrol_subject;       ///< Subject receiving enrolment envelopes.
+  std::string query_subject;       ///< Subject receiving identity-query envelopes.
+  std::string user_info_subject;   ///< Subject receiving user-info envelopes.
+  std::string delete_subject;      ///< Subject receiving user-deletion envelopes.
+  std::string debug_subject;       ///< Subject receiving diagnostic envelopes.
+  std::string token;               ///< Optional token authentication value.
+  std::string username;            ///< Username; paired with password.
+  std::string password;            ///< Password; paired with username.
+  std::string credentials_file;    ///< Optional NATS credentials-file path.
 };
 
-/** Qdrant endpoint, authentication, collection, and distance settings. */
+/**
+ * Qdrant endpoint and collection schema used by the gRPC vector store.
+ * The HTTP port is retained for configuration compatibility; the C++ client
+ * uses grpc_port and validates collection vector size and metric at startup.
+ */
 struct QdrantConfig {
-  std::string host;
-  int port;
-  int grpc_port;
-  std::string api_key;
-  bool https;
-  std::string metric;
-  std::string raw_collection;
-  std::string normalized_collection;
+  std::string host;                 ///< Qdrant hostname or IP address.
+  int port;                         ///< Configured HTTP API port.
+  int grpc_port;                    ///< Port used by the C++ gRPC client.
+  std::string api_key;              ///< Optional gRPC API-key metadata value.
+  bool https;                       ///< Use TLS for the gRPC channel.
+  std::string metric;               ///< Validated "cosine" or "euclidean" metric.
+  std::string raw_collection;       ///< Collection retaining each enrolment.
+  std::string normalized_collection;///< Collection retaining one vector per user.
 };
 
-/** Model loading and image preprocessing settings. */
+/**
+ * Inference backend selection and the preprocessing contract for its input.
+ * Values are validated by loadConfig before model initialization; mean and
+ * stddev are channel-ordered RGB/BGR normalization constants.
+ */
 struct ModelConfig {
-  std::string path;
-  std::string runtime;
-  std::string input_layout;
-  int input_size;
-  std::string input_name;
-  std::string output_name;
-  std::string color_order;
-  float pixel_scale;
-  std::array<float, 3> mean;
-  std::array<float, 3> stddev;
-  std::string alignment;
-  std::vector<std::array<float, 2> > reference_keypoints;
-  bool honor_preprocessed_flag;
-  std::string delegate_library;
-  std::string delegate_options;
+  std::string path;     ///< Resolved model file path.
+  std::string runtime;  ///< "onnx" or "litert", selected explicitly or by suffix.
+  std::string input_layout;  ///< Tensor memory order: "NCHW" or "NHWC".
+  int input_size;            ///< Square model input width and height in pixels.
+  std::string input_name;    ///< Optional explicit input tensor name.
+  std::string output_name;   ///< Optional explicit output tensor name.
+  std::string color_order;   ///< Model channel order: "RGB" or "BGR".
+  float pixel_scale;         ///< Multiplier applied to each source pixel.
+  std::array<float, 3> mean; ///< Per-channel value subtracted after scaling.
+  std::array<float, 3> stddev;  ///< Per-channel nonzero normalization divisor.
+  std::string alignment;        ///< "none" or "five_point".
+  std::vector<std::array<float, 2> > reference_keypoints;  ///< Five target [x,y] points.
+  bool honor_preprocessed_flag;  ///< Skip spatial preprocessing when request says so.
+  std::string delegate_library;  ///< Optional external LiteRT delegate library.
+  std::string delegate_options;  ///< Delegate options serialized as YAML text.
 };
 
-/** Complete validated configuration for the face identification service. */
+/** Fully parsed settings passed from startup into service and dependency setup. */
 struct AppConfig {
-  NatsConfig nats;
-  QdrantConfig qdrant;
-  ModelConfig model;
+  NatsConfig nats;       ///< Message transport configuration.
+  QdrantConfig qdrant;   ///< Persistent vector-store configuration.
+  ModelConfig model;     ///< Inference and image preprocessing configuration.
 };
 
-/** Load and validate YAML settings, resolving relative model paths from the file. */
+/**
+ * Load application YAML into typed NATS, Qdrant, and model settings.
+ * Relative model paths are resolved from the YAML file's directory.
+ * @param path Application YAML file to read.
+ * @return Complete validated configuration.
+ * @throws ConfigurationError for missing files, invalid values, or
+ *         incompatible setting combinations.
+ */
 AppConfig loadConfig(const std::string& path);
 
 }  // namespace faceid

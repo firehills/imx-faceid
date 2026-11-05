@@ -23,6 +23,11 @@
 namespace faceid {
 namespace {
 
+/**
+ * Build the batch-one tensor dimensions expected by the configured model.
+ * @param config Model input layout and square image size.
+ * @return Shape in NHWC or NCHW order.
+ */
 std::vector<int64_t> tensorShape(const ModelConfig& config) {
   if (config.input_layout == "NHWC") {
     return {1, config.input_size, config.input_size, 3};
@@ -30,11 +35,20 @@ std::vector<int64_t> tensorShape(const ModelConfig& config) {
   return {1, 3, config.input_size, config.input_size};
 }
 
+/** Validate a landmark coordinate before it enters the alignment transform. */
 double pointCoordinate(double value) {
   return std::isfinite(value) ? value :
       throw InferenceError("The supplied keypoints must be finite");
 }
 
+/**
+ * Warp an RGB face crop to the model's five configured landmark positions.
+ * @param image Decoded source image.
+ * @param source_points Request landmarks in left-eye-to-right-mouth order.
+ * @param target_points Corresponding model-space reference landmarks.
+ * @param size Output crop width and height in pixels.
+ * @return Affine-warped square image; invalid or degenerate landmarks throw.
+ */
 cv::Mat alignFivePoints(const cv::Mat& image,
                         const std::vector<std::array<float, 2> >& source_points,
                         const std::vector<std::array<float, 2> >& target_points,
@@ -94,6 +108,13 @@ cv::Mat alignFivePoints(const cv::Mat& image,
   return aligned;
 }
 
+/**
+ * Validate and decode supported compressed image bytes as RGB.
+ * @param image Encoded request data and its declared image format.
+ * @param decoded Output matrix populated with decoded RGB pixels.
+ * @throws InferenceError for format mismatch, unsupported encodings, or decode
+ *         failure.
+ */
 void decodeCompressedImage(const ImageRequest& image, cv::Mat* decoded) {
   const std::vector<uint8_t>& bytes = image.bytes;
   const bool bmp = bytes.size() >= 2 && bytes[0] == 'B' && bytes[1] == 'M';
@@ -122,6 +143,14 @@ void decodeCompressedImage(const ImageRequest& image, cv::Mat* decoded) {
   cv::cvtColor(*decoded, *decoded, cv::COLOR_BGR2RGB);
 }
 
+/**
+ * Resolve a model input/output tensor by configured name or sole-candidate rule.
+ * @param names Tensor names reported by the selected inference runtime.
+ * @param configured_name Optional explicit name from application configuration.
+ * @param kind "input" or "output", used in diagnostics and setting names.
+ * @param selected_name Receives the resolved tensor name.
+ * @param selected_index Receives that tensor's position in the runtime list.
+ */
 void selectTensorNames(const std::vector<std::string>& names,
                        const std::string& configured_name, const char* kind,
                        std::string* selected_name, size_t* selected_index) {
@@ -146,6 +175,11 @@ void selectTensorNames(const std::vector<std::string>& names,
   *selected_index = 0;
 }
 
+/**
+ * Flatten a LiteRT delegate-options YAML mapping into alternating key/value text.
+ * @param yaml_options Serialized YAML mapping retained by configuration loading.
+ * @return Strings consumed by the external delegate API in key/value pairs.
+ */
 std::vector<std::string> optionStrings(const std::string& yaml_options) {
   YAML::Node options;
   try {
@@ -167,9 +201,16 @@ std::vector<std::string> optionStrings(const std::string& yaml_options) {
 
 }  // namespace
 
+/** Construct the inference exception used for invalid inputs and runtime errors. */
 InferenceError::InferenceError(const std::string& message)
     : std::runtime_error(message) {}
 
+/**
+ * Validate and scale a model output to unit Euclidean length.
+ * @param values Raw model output values.
+ * @return Finite, nonzero values normalized to unit length.
+ * @throws InferenceError for empty, non-finite, or zero-norm output.
+ */
 std::vector<float> normalizeEmbedding(const std::vector<float>& values) {
   if (values.empty()) {
     throw InferenceError("The model returned an empty embedding");
@@ -192,6 +233,18 @@ std::vector<float> normalizeEmbedding(const std::vector<float>& values) {
   return normalized;
 }
 
+/**
+ * Convert request image bytes into the normalized model input tensor.
+ *
+ * Raw RGB data is copied directly; supported BMP/PNG payloads are decoded and
+ * converted from OpenCV's BGR ordering. The image is checked for square
+ * geometry, optionally aligned or resized, optionally reordered to BGR, then
+ * normalized and laid out as NCHW or NHWC.
+ * @param request Image bytes, dimensions, encoding, preprocessing flag, and
+ *                optional five-point landmarks.
+ * @param config Model size, channel order, layout, normalization, and alignment.
+ * @return Contiguous float tensor ready for ONNX Runtime or LiteRT.
+ */
 std::vector<float> prepareImage(const ImageRequest& request,
                                 const ModelConfig& config) {
   cv::Mat rgb;
@@ -264,6 +317,11 @@ std::vector<float> prepareImage(const ImageRequest& request,
 
 class EmbeddingModel::Impl {
  public:
+  /**
+   * Load one configured inference backend and discover the embedding dimension.
+   * @param model_config Validated model path, runtime, and input metadata.
+   * @throws InferenceError if model loading, tensor selection, or warm-up fails.
+   */
   explicit Impl(const ModelConfig& model_config)
       : config(model_config), dimension(0), input_index(0), output_index(0) {
     std::ifstream model_file(config.path.c_str(), std::ios::binary);
@@ -283,6 +341,13 @@ class EmbeddingModel::Impl {
     }
   }
 
+  /**
+   * Run the full image-to-embedding flow for one request.
+   * @param image Request pixels and their preprocessing metadata.
+   * @param timing Optional output for preprocessing and inference durations;
+   *               lock wait is excluded.
+   * @return Unit-length embedding with the dimension discovered at startup.
+   */
   std::vector<float> run(const ImageRequest& image, InferenceTiming* timing) {
     using Clock = std::chrono::steady_clock;
     using Milliseconds = std::chrono::duration<double, std::milli>;
@@ -308,6 +373,11 @@ class EmbeddingModel::Impl {
     return output;
   }
 
+  /**
+   * Dispatch an already prepared float tensor to the configured backend.
+   * @param tensor Contiguous normalized tensor in configured NCHW/NHWC layout.
+   * @return Raw float output from the selected ONNX or LiteRT tensor.
+   */
   std::vector<float> infer(const std::vector<float>& tensor) {
     if (config.runtime == "onnx") {
       return inferOnnx(tensor);
@@ -315,6 +385,10 @@ class EmbeddingModel::Impl {
     return inferLiteRt(tensor);
   }
 
+  /**
+   * Create the ONNX Runtime environment/session and resolve input/output names.
+   * @throws InferenceError when ONNX loading or tensor selection fails.
+   */
   void loadOnnx() {
     try {
       ort_env.reset(new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "imx-faceid"));
@@ -344,6 +418,11 @@ class EmbeddingModel::Impl {
     }
   }
 
+  /**
+   * Build and allocate a LiteRT interpreter, optionally installing a delegate.
+   * @throws InferenceError when model loading, delegate setup, or tensor
+   *         allocation fails.
+   */
   void loadLiteRt() {
     model = tflite::FlatBufferModel::BuildFromFile(config.path.c_str());
     if (!model) {
@@ -401,6 +480,11 @@ class EmbeddingModel::Impl {
     }
   }
 
+  /**
+   * Wrap an input tensor, execute the selected ONNX graph output, and copy it.
+   * @param tensor Normalized input values produced by prepareImage.
+   * @return Output tensor elements as owned float values.
+   */
   std::vector<float> inferOnnx(const std::vector<float>& tensor) {
     const std::vector<int64_t> shape = tensorShape(config);
     Ort::MemoryInfo memory_info =
@@ -426,6 +510,12 @@ class EmbeddingModel::Impl {
     }
   }
 
+  /**
+   * Populate LiteRT input storage, invoke the interpreter, and decode its output.
+   * Quantized tensors are converted using their per-tensor scale and zero point.
+   * @param tensor Normalized input values produced by prepareImage.
+   * @return Output tensor converted to float values for embedding normalization.
+   */
   std::vector<float> inferLiteRt(const std::vector<float>& tensor) {
     TfLiteTensor* input =
         interpreter->tensor(interpreter->inputs()[input_index]);
@@ -502,22 +592,33 @@ class EmbeddingModel::Impl {
   std::unique_ptr<tflite::Interpreter> interpreter;
 };
 
+/** Construct the owning implementation and initialize the selected backend. */
 EmbeddingModel::EmbeddingModel(const ModelConfig& config)
     : impl_(new Impl(config)) {}
 
+/** Release the backend through the implementation object's RAII-owned members. */
 EmbeddingModel::~EmbeddingModel() {}
 
+/**
+ * Generate a normalized embedding and optionally report stage timings.
+ * @param image Encoded or raw request pixels and associated metadata.
+ * @param timing Optional destination for preprocessing and inference durations.
+ * @return Unit-length model embedding.
+ */
 std::vector<float> EmbeddingModel::embed(const ImageRequest& image,
                                          InferenceTiming* timing) {
   return impl_->run(image, timing);
 }
 
+/** Return the output vector length measured during model warm-up. */
 size_t EmbeddingModel::embeddingDimension() const { return impl_->dimension; }
 
+/** Return the configured backend identifier ("onnx" or "litert"). */
 const std::string& EmbeddingModel::runtimeName() const {
   return impl_->config.runtime;
 }
 
+/** Return the resolved model file path retained at initialization. */
 const std::string& EmbeddingModel::modelPath() const { return impl_->config.path; }
 
 }  // namespace faceid

@@ -19,108 +19,174 @@ class FlatBufferError : public std::runtime_error {
   explicit FlatBufferError(const std::string& message);
 };
 
-/** Image bytes and preprocessing metadata shared by enrolment and query. */
+/**
+ * Owned image payload and preprocessing metadata shared by enrolment and query.
+ * Parsed byte/keypoint data is copied out of FlatBuffers so it can safely
+ * outlive the incoming NATS message buffer.
+ */
 struct ImageRequest {
-  std::vector<uint8_t> bytes;
-  uint32_t width;
-  uint32_t height;
-  bool is_preprocessed;
-  faceid::fbs::ImageEncoding encoding;
-  std::vector<std::array<float, 2> > keypoints;
+  std::vector<uint8_t> bytes;  ///< Raw RGB bytes or compressed image bytes.
+  uint32_t width;              ///< Declared source width; zero if unspecified.
+  uint32_t height;             ///< Declared source height; zero if unspecified.
+  bool is_preprocessed;        ///< Upstream spatial preprocessing indicator.
+  faceid::fbs::ImageEncoding encoding;  ///< Pixel layout or encoded image type.
+  std::vector<std::array<float, 2> > keypoints;  ///< Ordered facial landmarks.
 };
 
-/** A request to add an image embedding to a user's enrolments. */
+/** Decoded fields used to add one image embedding to a user's enrolments. */
 struct EnrolRequest {
-  std::string user_id;
-  std::string name;
-  ImageRequest image;
-  std::string reply_to;
-  int64_t time_unix_ms;
-  std::string custom;
+  std::string user_id;  ///< Required owner identity.
+  std::string name;     ///< Required display name stored with enrolments.
+  ImageRequest image;   ///< Pixels and preprocessing metadata for inference.
+  std::string reply_to; ///< Optional NATS response subject.
+  int64_t time_unix_ms; ///< Client timestamp; zero requests server time.
+  std::string custom;   ///< Opaque application metadata retained by the store.
 };
 
-/** A request to identify the person represented by an image. */
+/** Decoded image query and matching constraints for identity search. */
 struct QueryRequest {
-  std::string track_id;
-  ImageRequest image;
-  std::string reply_to;
-  float min_confidence;
-  uint32_t max_results;
-  int64_t pts;
-  int64_t time_unix_ms;
-  std::string custom;
+  std::string track_id;   ///< Required caller-provided request identifier.
+  ImageRequest image;     ///< Pixels and preprocessing metadata for inference.
+  std::string reply_to;   ///< Required NATS response subject.
+  float min_confidence;   ///< Minimum confidence retained in the response.
+  uint32_t max_results;   ///< Maximum nearest Qdrant candidates to request.
+  int64_t pts;            ///< Caller presentation timestamp.
+  int64_t time_unix_ms;   ///< Caller wall-clock timestamp.
+  std::string custom;     ///< Opaque request metadata, not used for matching.
 };
 
-/** A request to return the raw enrolments associated with a user. */
+/** User identity and reply metadata for a raw-enrolment lookup. */
 struct UserInfoRequest {
-  std::string user_id;
-  std::string reply_to;
-  int64_t time_unix_ms;
+  std::string user_id;   ///< Required owner identity to look up.
+  std::string reply_to;  ///< Optional NATS response subject.
+  int64_t time_unix_ms;  ///< Caller request timestamp.
 };
 
-/** A request to remove all enrolments associated with a user. */
+/** User identity and reply metadata for deleting all enrolments. */
 struct DeleteRequest {
-  std::string user_id;
-  std::string reply_to;
-  int64_t time_unix_ms;
+  std::string user_id;   ///< Required owner identity to delete.
+  std::string reply_to;  ///< Optional NATS response subject.
+  int64_t time_unix_ms;  ///< Caller request timestamp.
 };
 
-/** A request for service and dependency diagnostic information. */
+/** Reply metadata for a service/database diagnostic request. */
 struct DebugRequest {
-  std::string reply_to;
-  int64_t time_unix_ms;
+  std::string reply_to;  ///< Optional NATS response subject.
+  int64_t time_unix_ms;  ///< Caller request timestamp.
 };
 
-/** One Qdrant match returned in an identity query response. */
+/** Identity and converted score fields for one Qdrant query match. */
 struct Candidate {
-  std::string user_id;
-  std::string name;
-  float confidence;
-  float raw_distance;
+  std::string user_id;  ///< Matched owner identity.
+  std::string name;     ///< Stored display name, possibly empty.
+  float confidence;     ///< Metric-normalized confidence in [0, 1].
+  float raw_distance;   ///< Distance converted from Qdrant's raw score.
 };
 
-/** One raw enrolment returned by a user-info request. */
+/** Vector and timestamp copied from one raw Qdrant enrolment point. */
 struct EnrolmentRecord {
-  std::vector<float> embedding;
-  int64_t time_unix_ms;
+  std::vector<float> embedding;  ///< Stored raw embedding; serialized in response.
+  int64_t time_unix_ms;          ///< Timestamp stored with this enrolment.
 };
 
-/** Decode and validate an envelope containing an EnrolMsg. */
+/**
+ * Verify an incoming envelope and copy its EnrolMsg fields.
+ * @param data Serialized FACE envelope bytes.
+ * @param size Number of bytes available in data.
+ * @return Owned enrolment request; malformed or wrong-type envelopes throw.
+ */
 EnrolRequest parseEnrolRequest(const uint8_t* data, size_t size);
 
-/** Decode and validate an envelope containing an IdRequestMsg. */
+/**
+ * Verify an incoming envelope and copy its IdRequestMsg fields.
+ * @param data Serialized FACE envelope bytes.
+ * @param size Number of bytes available in data.
+ * @return Owned query request; malformed or wrong-type envelopes throw.
+ */
 QueryRequest parseQueryRequest(const uint8_t* data, size_t size);
 
-/** Decode and validate an envelope containing a UserInfoMsg. */
+/**
+ * Decode the identity and reply metadata of a UserInfoMsg envelope.
+ * @param data Serialized FACE envelope bytes.
+ * @param size Number of bytes available in data.
+ * @return User-info request fields; malformed or wrong-type envelopes throw.
+ */
 UserInfoRequest parseUserInfoRequest(const uint8_t* data, size_t size);
 
-/** Decode and validate an envelope containing a DeleteUserMsg. */
+/**
+ * Decode the identity and reply metadata of a DeleteUserMsg envelope.
+ * @param data Serialized FACE envelope bytes.
+ * @param size Number of bytes available in data.
+ * @return Delete request fields; malformed or wrong-type envelopes throw.
+ */
 DeleteRequest parseDeleteRequest(const uint8_t* data, size_t size);
 
-/** Decode and validate an envelope containing a DebugInfoMsg. */
+/**
+ * Decode reply metadata from a DebugInfoMsg envelope.
+ * @param data Serialized FACE envelope bytes.
+ * @param size Number of bytes available in data.
+ * @return Diagnostic request fields; malformed or wrong-type envelopes throw.
+ */
 DebugRequest parseDebugRequest(const uint8_t* data, size_t size);
 
-/** Encode an enrolment success or failure response. */
+/**
+ * Build a timestamped EnrolResult envelope.
+ * @param user_id User identity echoed to the caller.
+ * @param success Operation outcome.
+ * @param reason Failure explanation; ignored by callers on success.
+ * @return Serialized FACE envelope bytes ready to publish on NATS.
+ */
 std::vector<uint8_t> makeEnrolResult(const std::string& user_id, bool success,
                                      const std::string& reason = "");
 
-/** Encode an identity query response, including candidate confidence and distance. */
+/**
+ * Build a timestamped IdResult envelope with candidate identity and scores.
+ * @param track_id Request identifier echoed to the caller.
+ * @param candidates Matching users and their converted score metadata.
+ * @param success Operation outcome.
+ * @param reason Failure explanation; ignored by callers on success.
+ * @return Serialized FACE envelope bytes ready to publish on NATS.
+ */
 std::vector<uint8_t> makeQueryResult(const std::string& track_id,
                                      const std::vector<Candidate>& candidates,
                                      bool success,
                                      const std::string& reason = "");
 
-/** Encode a user-info response containing each raw embedding and timestamp. */
+/**
+ * Build a timestamped response containing raw enrolment vectors and times.
+ * @param user_id User identity echoed to the caller.
+ * @param records Raw vectors and timestamps retrieved from Qdrant.
+ * @param success Operation outcome.
+ * @param reason Failure explanation; ignored by callers on success.
+ * @return Serialized FACE envelope bytes ready to publish on NATS.
+ */
 std::vector<uint8_t> makeUserInfoResponse(
     const std::string& user_id, const std::vector<EnrolmentRecord>& records,
     bool success, const std::string& reason = "");
 
-/** Encode a delete-user success or failure response. */
+/**
+ * Build a timestamped DeleteUserResponse envelope.
+ * @param user_id User identity echoed to the caller.
+ * @param success Operation outcome.
+ * @param reason Failure explanation; ignored by callers on success.
+ * @return Serialized FACE envelope bytes ready to publish on NATS.
+ */
 std::vector<uint8_t> makeDeleteResponse(const std::string& user_id,
                                        bool success,
                                        const std::string& reason = "");
 
-/** Encode database, inference, and NATS diagnostic information. */
+/**
+ * Build a timestamped response containing dependency and model diagnostics.
+ * @param database_type Backing-store identity.
+ * @param database_version Backing-store server version.
+ * @param inference_backend Selected inference runtime.
+ * @param model_name Configured model basename.
+ * @param embedding_dim Number of floats produced by the model.
+ * @param nats_url Configured NATS endpoint.
+ * @param success Whether diagnostics were collected successfully.
+ * @param reason Failure explanation; ignored by callers on success.
+ * @return Serialized FACE envelope bytes ready to publish on NATS.
+ */
 std::vector<uint8_t> makeDebugResponse(
     const std::string& database_type, const std::string& database_version,
     const std::string& inference_backend, const std::string& model_name,

@@ -22,6 +22,7 @@ const size_t kScrollPageSize = 256;
 const char kBase64Alphabet[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/** Generate a random RFC 4122 version-4 UUID for a new Qdrant point. */
 std::string makeUuid() {
   static thread_local std::mt19937_64 generator([]() {
     std::random_device random;
@@ -50,6 +51,11 @@ std::string makeUuid() {
   return result.str();
 }
 
+/**
+ * Encode stored image bytes as the Base64 text used in Qdrant payload metadata.
+ * @param bytes Original RGB or compressed image data.
+ * @return Standard Base64 representation, including required padding.
+ */
 std::string encodeBase64(const std::vector<uint8_t>& bytes) {
   std::string encoded;
   encoded.reserve(((bytes.size() + 2) / 3) * 4);
@@ -69,16 +75,23 @@ std::string encodeBase64(const std::vector<uint8_t>& bytes) {
   return encoded;
 }
 
+/** Set a named Qdrant point payload field to a string value. */
 void setStringPayload(qdrant::PointStruct* point, const std::string& key,
                       const std::string& value) {
   (*point->mutable_payload())[key].set_string_value(value);
 }
 
+/** Set a named Qdrant point payload field to a signed integer value. */
 void setIntegerPayload(qdrant::PointStruct* point, const std::string& key,
                        int64_t value) {
   (*point->mutable_payload())[key].set_integer_value(value);
 }
 
+/**
+ * Build the Qdrant filter that selects raw points belonging to one user.
+ * @param user_id Exact keyword value to match.
+ * @return Filter requiring payload.user_id to equal user_id.
+ */
 qdrant::Filter userFilter(const std::string& user_id) {
   qdrant::Filter filter;
   qdrant::FieldCondition* field =
@@ -88,6 +101,13 @@ qdrant::Filter userFilter(const std::string& user_id) {
   return filter;
 }
 
+/**
+ * Read a string from protobuf payload, optionally requiring it to exist.
+ * @param payload Qdrant point payload returned by gRPC.
+ * @param key Payload field name.
+ * @param required Whether a missing or non-string field is an error.
+ * @return Stored text, or empty text if optional and unavailable.
+ */
 std::string stringPayload(const google::protobuf::Map<std::string, qdrant::Value>&
                               payload,
                           const std::string& key, bool required) {
@@ -103,6 +123,12 @@ std::string stringPayload(const google::protobuf::Map<std::string, qdrant::Value
   return found->second.string_value();
 }
 
+/**
+ * Read a timestamp/count payload as an integer, accepting protobuf doubles too.
+ * @param payload Qdrant point payload returned by gRPC.
+ * @param key Payload field name.
+ * @return Stored integer, converted double, or zero when absent/other-typed.
+ */
 int64_t integerPayload(const google::protobuf::Map<std::string, qdrant::Value>&
                            payload,
                        const std::string& key) {
@@ -119,6 +145,12 @@ int64_t integerPayload(const google::protobuf::Map<std::string, qdrant::Value>&
   return 0;
 }
 
+/**
+ * Wrap a failed Qdrant RPC status with the operation and server diagnostic.
+ * @param operation Description of the failed RPC.
+ * @param status gRPC result returned by the generated Qdrant stub.
+ * @return Runtime error value to throw at the call site.
+ */
 std::runtime_error rpcError(const std::string& operation,
                             const grpc::Status& status) {
   std::ostringstream message;
@@ -131,6 +163,11 @@ std::runtime_error rpcError(const std::string& operation,
 
 class VectorStore::Impl {
  public:
+  /**
+   * Connect the gRPC stubs and create or validate both configured collections.
+   * @param config Qdrant endpoint, credentials, collection names, and metric.
+   * @param embedding_dim Required dense-vector size for both collections.
+   */
   Impl(const QdrantConfig& config, size_t embedding_dim)
       : config_(config), embedding_dim_(embedding_dim) {
     const std::string target = config.host + ":" + std::to_string(config.grpc_port);
@@ -145,6 +182,19 @@ class VectorStore::Impl {
     ensureCollection(config_.normalized_collection);
   }
 
+  /**
+   * Add a raw enrolment and refresh that user's normalized mean vector.
+   *
+   * The raw image, embedding, and metadata are upserted first. All raw vectors
+   * for the user are then re-read, names synchronized, and their normalized
+   * mean replaces the user's single point in the normalized collection.
+   * @param user_id Stable owner key stored in both collections.
+   * @param name Display name shared by the user's enrolments.
+   * @param custom Application metadata stored as text on the raw point.
+   * @param embedding Unit-length model output of embedding_dim_ values.
+   * @param image_bytes Original request image data retained with the raw point.
+   * @param time_unix_ms Request timestamp, or server time supplied by service.
+   */
   void enroll(const std::string& user_id, const std::string& name,
               const std::string& custom, const std::vector<float>& embedding,
               const std::vector<uint8_t>& image_bytes, int64_t time_unix_ms) {
@@ -216,6 +266,13 @@ class VectorStore::Impl {
     upsert(normalized_request, "normalized enrolment");
   }
 
+  /**
+   * Search the normalized collection and filter matches by confidence.
+   * @param embedding Unit-length query vector with the configured dimension.
+   * @param max_results Maximum number of Qdrant points requested.
+   * @param min_confidence Minimum converted confidence to return.
+   * @return Candidate identity and score metadata; vectors are not returned.
+   */
   std::vector<Candidate> query(const std::vector<float>& embedding,
                                uint32_t max_results,
                                float min_confidence) {
@@ -264,6 +321,11 @@ class VectorStore::Impl {
     return matches;
   }
 
+  /**
+   * Load every raw enrolment vector and timestamp for one user.
+   * @param user_id Payload key used to page through matching raw points.
+   * @return Owned records in Qdrant scroll order.
+   */
   std::vector<EnrolmentRecord> userInfo(const std::string& user_id) {
     const std::vector<qdrant::RetrievedPoint> points = scrollUser(user_id);
     std::vector<EnrolmentRecord> records;
@@ -277,11 +339,19 @@ class VectorStore::Impl {
     return records;
   }
 
+  /**
+   * Remove the user's points from both raw and normalized collections.
+   * @param user_id Exact user ID used to build the deletion filters.
+   */
   void deleteUser(const std::string& user_id) {
     deleteByUser(config_.raw_collection, user_id);
     deleteByUser(config_.normalized_collection, user_id);
   }
 
+  /**
+   * Query Qdrant health to obtain the database product and server version.
+   * @return Pair containing the fixed database name and server-reported version.
+   */
   std::pair<std::string, std::string> debugInfo() {
     qdrant::HealthCheckRequest request;
     qdrant::HealthCheckReply response;
@@ -295,12 +365,18 @@ class VectorStore::Impl {
   }
 
  private:
+  /** Attach the configured API key to an outgoing gRPC request, if present. */
   void addAuth(grpc::ClientContext& context) const {
     if (!config_.api_key.empty()) {
       context.AddMetadata("api-key", config_.api_key);
     }
   }
 
+  /**
+   * Ensure an embedding matches the vector dimension used by the collections.
+   * @param embedding Vector to validate.
+   * @param operation Operation name included in the size-mismatch diagnostic.
+   */
   void validateEmbedding(const std::vector<float>& embedding,
                          const std::string& operation) const {
     if (embedding.size() != embedding_dim_) {
@@ -311,6 +387,7 @@ class VectorStore::Impl {
     }
   }
 
+  /** Map the validated configuration metric to Qdrant's protobuf enum. */
   qdrant::Distance distance() const {
     if (config_.metric == "cosine") {
       return qdrant::Cosine;
@@ -322,6 +399,10 @@ class VectorStore::Impl {
                                 config_.metric);
   }
 
+  /**
+   * Create a missing collection or validate an existing collection's schema.
+   * @param name Collection to check against embedding_dim_ and configured metric.
+   */
   void ensureCollection(const std::string& name) {
     qdrant::CollectionExistsRequest exists_request;
     exists_request.set_collection_name(name);
@@ -391,6 +472,11 @@ class VectorStore::Impl {
     }
   }
 
+  /**
+   * Copy float embedding values into a Qdrant point's dense-vector field.
+   * @param point Point whose vectors field is populated.
+   * @param values Ordered embedding components.
+   */
   void setVector(qdrant::PointStruct* point,
                  const std::vector<float>& values) const {
     qdrant::DenseVector* dense =
@@ -400,6 +486,11 @@ class VectorStore::Impl {
     }
   }
 
+  /**
+   * Send a Qdrant upsert with authentication and turn RPC failures into errors.
+   * @param request Collection name, point payloads, and vectors to store.
+   * @param operation Human-readable description for failure diagnostics.
+   */
   void upsert(const qdrant::UpsertPoints& request,
               const std::string& operation) {
     qdrant::PointsOperationResponse response;
@@ -411,6 +502,11 @@ class VectorStore::Impl {
     }
   }
 
+  /**
+   * Retrieve all raw enrolment points for a user using offset-based paging.
+   * @param user_id Exact payload value used for the user filter.
+   * @return Complete set of matching points with payload and vector data.
+   */
   std::vector<qdrant::RetrievedPoint> scrollUser(const std::string& user_id) {
     std::vector<qdrant::RetrievedPoint> points;
     qdrant::PointId offset;
@@ -442,6 +538,11 @@ class VectorStore::Impl {
     }
   }
 
+  /**
+   * Validate and copy one stored raw point's single dense vector.
+   * @param point Retrieved Qdrant raw enrolment.
+   * @return Owned vector containing exactly embedding_dim_ float values.
+   */
   std::vector<float> pointVector(const qdrant::RetrievedPoint& point) const {
     if (!point.has_vectors() ||
         point.vectors().vectors_options_case() != qdrant::VectorsOutput::kVector ||
@@ -457,6 +558,11 @@ class VectorStore::Impl {
     return std::vector<float>(data.begin(), data.end());
   }
 
+  /**
+   * Update the name payload for all raw points selected by their common user ID.
+   * @param points Non-empty points for the user; the first supplies user_id.
+   * @param name New display name to apply to every selected point.
+   */
   void setNameForPoints(const std::vector<qdrant::RetrievedPoint>& points,
                         const std::string& name) {
     qdrant::SetPayloadPoints request;
@@ -476,6 +582,11 @@ class VectorStore::Impl {
     }
   }
 
+  /**
+   * Delete all points in a collection that match the specified user ID.
+   * @param collection Raw or normalized collection name.
+   * @param user_id Exact payload value used to filter points.
+   */
   void deleteByUser(const std::string& collection, const std::string& user_id) {
     qdrant::DeletePoints request;
     request.set_collection_name(collection);
@@ -498,11 +609,20 @@ class VectorStore::Impl {
   std::unique_ptr<qdrant::Qdrant::Stub> health_;
 };
 
+/**
+ * Construct the PImpl, connecting to Qdrant and validating both collections.
+ * @param config Qdrant connection, authentication, and collection settings.
+ * @param embedding_dim Dense vector dimension produced by the model.
+ */
 VectorStore::VectorStore(const QdrantConfig& config, size_t embedding_dim)
     : impl_(new Impl(config, embedding_dim)) {}
 
+/** Release the PImpl, gRPC stubs, and channel through RAII. */
 VectorStore::~VectorStore() = default;
 
+/**
+ * Forward a new enrolment's identity, metadata, pixels, and embedding to Qdrant.
+ */
 void VectorStore::enroll(const std::string& user_id, const std::string& name,
                          const std::string& custom,
                          const std::vector<float>& embedding,
@@ -511,20 +631,24 @@ void VectorStore::enroll(const std::string& user_id, const std::string& name,
   impl_->enroll(user_id, name, custom, embedding, image_bytes, time_unix_ms);
 }
 
+/** Forward a normalized query vector and matching limits to Qdrant. */
 std::vector<Candidate> VectorStore::query(const std::vector<float>& embedding,
                                           uint32_t max_results,
                                           float min_confidence) {
   return impl_->query(embedding, max_results, min_confidence);
 }
 
+/** Return the user's raw embedding records and their timestamps. */
 std::vector<EnrolmentRecord> VectorStore::userInfo(const std::string& user_id) {
   return impl_->userInfo(user_id);
 }
 
+/** Delete all raw and normalized vectors belonging to the specified user. */
 void VectorStore::deleteUser(const std::string& user_id) {
   impl_->deleteUser(user_id);
 }
 
+/** Return the Qdrant product identifier and server version. */
 std::pair<std::string, std::string> VectorStore::debugInfo() {
   return impl_->debugInfo();
 }

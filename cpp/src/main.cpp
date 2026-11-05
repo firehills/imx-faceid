@@ -17,6 +17,11 @@ namespace {
 
 volatile std::sig_atomic_t g_stop_requested = 0;
 
+/**
+ * Signal-safe request to stop; a repeated signal requests immediate termination.
+ * The signal number itself is ignored; the handler records the first request
+ * and treats a repeated signal as a request to force process exit.
+ */
 void requestStop(int) {
   if (g_stop_requested != 0) {
     std::_Exit(130);
@@ -24,11 +29,19 @@ void requestStop(int) {
   g_stop_requested = 1;
 }
 
+/** Runtime paths selected from the command line or their working-directory defaults. */
 struct Options {
   std::string config_path = "config.yaml";
   std::string logging_path = "spdlog.yaml";
 };
 
+/**
+ * Parse the supported command-line flags without loading application services.
+ * @param argc Number of process arguments.
+ * @param argv Argument strings, including the executable name at index zero.
+ * @return Application and spdlog configuration paths.
+ * @throws std::invalid_argument for unknown or incomplete options.
+ */
 Options parseOptions(int argc, char** argv) {
   Options options;
   for (int index = 1; index < argc; ++index) {
@@ -50,6 +63,17 @@ Options parseOptions(int argc, char** argv) {
 
 }  // namespace
 
+/**
+ * Initialize logging and dependencies, then run until SIGINT or SIGTERM.
+ *
+ * Startup failures are written through the bootstrap stderr logger. Successful
+ * startup transfers configuration, model, and store references to the service;
+ * after its signal-controlled loop exits, logging is flushed before returning.
+ * @param argc Number of process arguments.
+ * @param argv Argument strings, including the executable name.
+ * @return Zero for normal shutdown/help, or two for a reported startup/runtime
+ *         exception.
+ */
 int main(int argc, char** argv) {
   const auto startup_logger = spdlog::stderr_color_mt("startup");
   spdlog::set_default_logger(startup_logger);

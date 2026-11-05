@@ -6,6 +6,13 @@
 
 namespace faceid {
 
+/**
+ * Convert a Qdrant metric score into API distance and bounded confidence.
+ * @param score Raw similarity/distance returned by Qdrant.
+ * @param metric Configured metric; currently cosine or euclidean.
+ * @return Pair of raw distance and confidence clamped to [0, 1].
+ * @throws std::invalid_argument when metric is unsupported.
+ */
 std::pair<float, float> scoreToDistanceConfidence(
     float score, const std::string& metric) {
   float raw_distance;

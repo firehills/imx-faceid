@@ -17,17 +17,27 @@ namespace {
 
 const int64_t kShutdownTimeoutMs = 30000;
 
+/** Convert a libnats status into its human-readable diagnostic. */
 std::string natsError(natsStatus status) {
   return natsStatus_GetText(status);
 }
 
+/**
+ * Turn a failed libnats operation into an exception with operation context.
+ * @param status Result returned by libnats.
+ * @param operation Description of the connection/subscription operation.
+ */
 void checkNats(natsStatus status, const std::string& operation) {
   if (status != NATS_OK) {
     throw std::runtime_error(operation + ": " + natsError(status));
   }
 }
 
-// Summarise image metadata without the pixel/encoded byte payload.
+/**
+ * Format request image metadata while deliberately excluding image contents.
+ * @param image Parsed image dimensions, encoding, flags, bytes, and landmarks.
+ * @return Compact trace-level description safe from dumping pixel data.
+ */
 std::string describeImage(const ImageRequest& image) {
   return fmt::format(
       "image={{{}x{} encoding={} preprocessed={} bytes={} keypoints={}}}",
@@ -36,6 +46,11 @@ std::string describeImage(const ImageRequest& image) {
       image.bytes.size(), image.keypoints.size());
 }
 
+/**
+ * Format query matches with identity and score fields, but no embedding vectors.
+ * @param candidates Results returned by the vector store.
+ * @return Human-readable candidate summaries for trace diagnostics.
+ */
 std::string describeCandidates(const std::vector<Candidate>& candidates) {
   std::string result = "[";
   for (size_t index = 0; index < candidates.size(); ++index) {
@@ -49,6 +64,7 @@ std::string describeCandidates(const std::vector<Candidate>& candidates) {
   return result + "]";
 }
 
+/** Return the current wall-clock time in milliseconds since the Unix epoch. */
 int64_t currentTimeUnixMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
@@ -57,10 +73,24 @@ int64_t currentTimeUnixMs() {
 
 }  // namespace
 
+/**
+ * Bind validated settings and service dependencies without starting I/O.
+ * @param config Application and NATS configuration; must outlive the service.
+ * @param model Initialized inference model; shared by message handlers.
+ * @param store Connected Qdrant-backed vector store.
+ */
 FaceIdService::FaceIdService(const AppConfig& config, EmbeddingModel& model,
                              VectorStore& store)
     : config_(config), model_(model), store_(store), connection_(nullptr) {}
 
+/**
+ * Connect, register request handlers, then block until a signal requests stop.
+ *
+ * Incoming NATS callbacks route through the subscriptions created here. On
+ * normal stop or startup/registration failure, the same shutdown path drains
+ * subscriptions when possible and releases this service's connection.
+ * @param stop_requested Signal-safe flag set by the process signal handler.
+ */
 void FaceIdService::run(const volatile std::sig_atomic_t& stop_requested) {
   try {
     connect();
@@ -83,6 +113,13 @@ void FaceIdService::run(const volatile std::sig_atomic_t& stop_requested) {
   shutdown();
 }
 
+/**
+ * Create an authenticated libnats connection from the validated NATS settings.
+ *
+ * Credentials-file, token, or username/password authentication is selected
+ * exclusively according to the parsed config. The temporary options object is
+ * destroyed on both successful connection and failure.
+ */
 void FaceIdService::connect() {
   natsOptions* options = nullptr;
   checkNats(natsOptions_Create(&options), "Create NATS options");
@@ -114,6 +151,11 @@ void FaceIdService::connect() {
   }
 }
 
+/**
+ * Bind one configured subject to a service operation callback.
+ * @param subject NATS subject to subscribe to.
+ * @param operation Request handler selected for messages on that subject.
+ */
 void FaceIdService::subscribe(const std::string& subject,
                               Operation operation) {
   std::unique_ptr<SubscriptionBinding> binding(new SubscriptionBinding());
@@ -127,6 +169,11 @@ void FaceIdService::subscribe(const std::string& subject,
   subscriptions_.push_back(std::move(binding));
 }
 
+/**
+ * Own an asynchronous NATS message and dispatch it using subscription metadata.
+ * @param message Delivered request; ownership is released after callback returns.
+ * @param closure SubscriptionBinding installed by subscribe().
+ */
 void FaceIdService::onMessage(natsConnection*, natsSubscription*, natsMsg* message,
                               void* closure) {
   std::unique_ptr<natsMsg, void (*)(natsMsg*)> owned_message(message,
@@ -138,6 +185,11 @@ void FaceIdService::onMessage(natsConnection*, natsSubscription*, natsMsg* messa
   binding->service->dispatch(binding->operation, message);
 }
 
+/**
+ * Log and route a received message to the operation-specific request handler.
+ * @param operation Handler selected when its subject was subscribed.
+ * @param message NATS envelope payload to decode and process.
+ */
 void FaceIdService::dispatch(Operation operation, natsMsg* message) {
   const char* subject = natsMsg_GetSubject(message);
   spdlog::debug("NATS request subject={}", subject == nullptr ? "" : subject);
@@ -163,6 +215,14 @@ void FaceIdService::dispatch(Operation operation, natsMsg* message) {
   }
 }
 
+/**
+ * Decode an enrol request, generate its embedding, update Qdrant, and reply.
+ *
+ * The request identity lock serializes updates to the same user, while the
+ * inference lock protects the backend. Any standard exception is logged and
+ * converted into a failure result when a reply subject was supplied.
+ * @param message Incoming enrolment envelope.
+ */
 void FaceIdService::handleEnrol(natsMsg* message) {
   std::string user_id;
   std::string reply_to;
@@ -207,6 +267,11 @@ void FaceIdService::handleEnrol(natsMsg* message) {
   }
 }
 
+/**
+ * Decode an identity query, infer an embedding, search Qdrant, and reply.
+ * @param message Incoming query envelope with track ID, image, and thresholds.
+ * Invalid thresholds and downstream failures become failure responses.
+ */
 void FaceIdService::handleQuery(natsMsg* message) {
   std::string track_id;
   std::string reply_to;
@@ -258,6 +323,11 @@ void FaceIdService::handleQuery(natsMsg* message) {
   }
 }
 
+/**
+ * Fetch a user's raw enrolment metadata and vectors, then serialize a reply.
+ * @param message Incoming user-info envelope.
+ * Embedding contents remain in the protocol response and are never logged.
+ */
 void FaceIdService::handleUserInfo(natsMsg* message) {
   std::string user_id;
   std::string reply_to;
@@ -294,6 +364,11 @@ void FaceIdService::handleUserInfo(natsMsg* message) {
   }
 }
 
+/**
+ * Delete all stored enrolments for one user while holding that user's lock.
+ * @param message Incoming delete-user envelope.
+ * Store errors are converted to a failure response when reply_to is present.
+ */
 void FaceIdService::handleDeleteUser(natsMsg* message) {
   std::string user_id;
   std::string reply_to;
@@ -323,6 +398,11 @@ void FaceIdService::handleDeleteUser(natsMsg* message) {
   }
 }
 
+/**
+ * Collect Qdrant/runtime/model diagnostics and return them to the caller.
+ * @param message Incoming debug-info envelope.
+ * On failure, return the available runtime details with the error reason.
+ */
 void FaceIdService::handleDebug(natsMsg* message) {
   std::string reply_to;
   try {
@@ -360,6 +440,12 @@ void FaceIdService::handleDebug(natsMsg* message) {
   }
 }
 
+/**
+ * Publish a serialized response to its requested NATS subject.
+ * @param reply_to Response subject from the request; empty means no reply.
+ * @param payload Complete serialized FACE response envelope.
+ * Oversized responses are rejected before conversion to libnats' int length.
+ */
 void FaceIdService::publish(const std::string& reply_to,
                             const std::vector<uint8_t>& payload) {
   if (reply_to.empty()) {
@@ -379,6 +465,12 @@ void FaceIdService::publish(const std::string& reply_to,
   }
 }
 
+/**
+ * Report a failed request operation without throwing from its callback.
+ * @param operation Human-readable operation name.
+ * @param identity Optional user or track identifier associated with the failure.
+ * @param error Exception caught by the request handler.
+ */
 void FaceIdService::logFailure(const std::string& operation,
                                const std::string& identity,
                                const std::exception& error) const {
@@ -389,6 +481,11 @@ void FaceIdService::logFailure(const std::string& operation,
   }
 }
 
+/**
+ * Get or create a mutex dedicated to one user's Qdrant mutations.
+ * @param user_id User identifier used as the lock-map key.
+ * @return Shared lock object retained in the service's per-user map.
+ */
 std::shared_ptr<std::mutex> FaceIdService::userMutex(
     const std::string& user_id) {
   std::lock_guard<std::mutex> lock(user_mutex_map_mutex_);
@@ -399,6 +496,11 @@ std::shared_ptr<std::mutex> FaceIdService::userMutex(
   return user_lock;
 }
 
+/**
+ * Copy the opaque payload bytes from a libnats message into owned storage.
+ * @param message NATS message whose data remains valid during this call.
+ * @return Payload bytes, or an empty vector for absent/empty data.
+ */
 std::vector<uint8_t> FaceIdService::messageData(const natsMsg* message) const {
   const char* data = natsMsg_GetData(message);
   const int length = natsMsg_GetDataLength(message);
@@ -409,6 +511,13 @@ std::vector<uint8_t> FaceIdService::messageData(const natsMsg* message) const {
   return std::vector<uint8_t>(begin, begin + length);
 }
 
+/**
+ * Drain and destroy this service's NATS subscriptions and connection.
+ *
+ * Connected subscriptions share a single bounded drain deadline. If the
+ * connection has dropped, drain and flush calls are skipped to avoid waiting
+ * through their timeouts; the local client connection is still closed.
+ */
 void FaceIdService::shutdown() {
   // Draining or flushing a disconnected connection only waits for timeouts.
   const bool connected =

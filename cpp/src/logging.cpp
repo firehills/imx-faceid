@@ -18,6 +18,11 @@ static_assert(SPDLOG_VER_MAJOR == 1 && SPDLOG_VER_MINOR == 17 &&
 namespace faceid {
 namespace {
 
+/**
+ * Translate the YAML level name to spdlog's enum.
+ * @param value One configured lowercase level name.
+ * @return Corresponding spdlog severity; unsupported names throw.
+ */
 spdlog::level::level_enum readLevel(const std::string& value) {
   const std::pair<const char*, spdlog::level::level_enum> levels[] = {
       {"trace", spdlog::level::trace}, {"debug", spdlog::level::debug},
@@ -35,6 +40,15 @@ spdlog::level::level_enum readLevel(const std::string& value) {
 
 }  // namespace
 
+/**
+ * Load the C++ logging YAML and atomically replace spdlog's default logger.
+ *
+ * The function validates supported keys, constructs stderr and optional file
+ * sinks, applies the selected severity/pattern, and only then installs the
+ * logger. Relative file destinations are resolved against the YAML file's
+ * directory; parsing, validation, and sink-creation errors propagate.
+ * @param path Logging configuration file path.
+ */
 void initializeLogging(const std::string& path) {
   try {
     const YAML::Node root = YAML::LoadFile(path);
