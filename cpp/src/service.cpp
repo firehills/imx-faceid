@@ -1,5 +1,6 @@
 #include "faceid/service.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <spdlog/spdlog.h>
@@ -51,6 +52,7 @@ void FaceIdService::run(const volatile std::sig_atomic_t& stop_requested) {
     while (stop_requested == 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    spdlog::info("Stop requested; shutting down (press Ctrl+C again to force)");
   } catch (...) {
     shutdown();
     throw;
@@ -306,32 +308,53 @@ std::vector<uint8_t> FaceIdService::messageData(const natsMsg* message) const {
 }
 
 void FaceIdService::shutdown() {
-  for (const std::unique_ptr<SubscriptionBinding>& binding : subscriptions_) {
-    if (binding->subscription != nullptr) {
-      const natsStatus status =
-          natsSubscription_DrainTimeout(binding->subscription, kShutdownTimeoutMs);
-      if (status != NATS_OK) {
-        spdlog::error("Drain NATS subscription failed: {}", natsError(status));
+  // Draining or flushing a disconnected connection only waits for timeouts.
+  const bool connected =
+      connection_ != nullptr &&
+      natsConnection_Status(connection_) == NATS_CONN_STATUS_CONNECTED;
+  if (connection_ != nullptr && !connected) {
+    spdlog::warn("NATS is not connected; skipping drain and flush");
+  }
+  if (connected) {
+    for (const std::unique_ptr<SubscriptionBinding>& binding : subscriptions_) {
+      if (binding->subscription != nullptr) {
+        const natsStatus status = natsSubscription_DrainTimeout(
+            binding->subscription, kShutdownTimeoutMs);
+        if (status != NATS_OK) {
+          spdlog::error("Drain NATS subscription failed: {}", natsError(status));
+        }
       }
     }
   }
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(kShutdownTimeoutMs);
   for (const std::unique_ptr<SubscriptionBinding>& binding : subscriptions_) {
     if (binding->subscription != nullptr) {
-      const natsStatus status = natsSubscription_WaitForDrainCompletion(
-          binding->subscription, kShutdownTimeoutMs);
-      if (status != NATS_OK) {
-        spdlog::error("Wait for NATS subscription drain failed: {}", natsError(status));
+      if (connected) {
+        const int64_t remaining_ms = std::max<int64_t>(
+            1, std::chrono::duration_cast<std::chrono::milliseconds>(
+                   deadline - std::chrono::steady_clock::now())
+                   .count());
+        const natsStatus status = natsSubscription_WaitForDrainCompletion(
+            binding->subscription, remaining_ms);
+        if (status != NATS_OK) {
+          spdlog::error("Wait for NATS subscription drain failed: {}",
+                        natsError(status));
+        }
       }
       natsSubscription_Destroy(binding->subscription);
       binding->subscription = nullptr;
     }
   }
   if (connection_ != nullptr) {
-    const natsStatus flush_status =
-        natsConnection_FlushTimeout(connection_, 5000);
-    if (flush_status != NATS_OK) {
-      spdlog::error("Flush NATS responses failed: {}", natsError(flush_status));
+    if (natsConnection_Status(connection_) == NATS_CONN_STATUS_CONNECTED) {
+      const natsStatus flush_status =
+          natsConnection_FlushTimeout(connection_, 5000);
+      if (flush_status != NATS_OK) {
+        spdlog::error("Flush NATS responses failed: {}", natsError(flush_status));
+      }
     }
+    natsConnection_Close(connection_);
     natsConnection_Destroy(connection_);
     connection_ = nullptr;
   }

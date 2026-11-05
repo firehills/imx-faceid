@@ -17,7 +17,12 @@ namespace {
 
 volatile std::sig_atomic_t g_stop_requested = 0;
 
-void requestStop(int) { g_stop_requested = 1; }
+void requestStop(int) {
+  if (g_stop_requested != 0) {
+    std::_Exit(130);
+  }
+  g_stop_requested = 1;
+}
 
 struct Options {
   std::string config_path = "config.yaml";
@@ -58,6 +63,7 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, requestStop);
     std::signal(SIGTERM, requestStop);
     service.run(g_stop_requested);
+    spdlog::info("imx-faceid-cpp stopped");
     spdlog::shutdown();
     return 0;
   } catch (const std::exception& error) {

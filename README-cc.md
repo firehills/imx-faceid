@@ -28,6 +28,12 @@ Both paths default to the shown filenames in the working directory. CMake also
 copies [spdlog.yaml](spdlog.yaml) into the build directory. Deploy this file
 alongside the executable, or pass its absolute path.
 
+## Stopping
+
+Ctrl+C (SIGINT) or SIGTERM stops only `imx_faceid_cpp`, never the NATS server.
+If NATS is connected, the service drains in-flight requests (up to 30s). If NATS
+is disconnected, it exits immediately. A second Ctrl+C forces exit with code 130.
+
 The C++ service configures spdlog from this separate YAML file at startup:
 
 - `level`: `trace`, `debug`, `info`, `warn`, `error`, `critical`, or `off`.
